@@ -42,17 +42,20 @@ class MazeSolver(Node):
         return distance
 
     def scan_callback(self, msg):
-        # Visión continua sin puntos ciegos
+        # 1. ESCUDO DE SEGURIDAD: Evita que el programa explote si Gazebo 
+        # envía un escaneo vacío al arrancar o estar pausado.
+        if not msg.ranges or len(msg.ranges) < 360:
+            return
+
+        # 2. VISIÓN AMPLIADA (Sin puntos ciegos)
         # Frente: de -20 a +20 grados
         front_ranges = msg.ranges[0:20] + msg.ranges[340:359]
-        
-        # Izquierda: empalma justo donde acaba el frente (20) hasta el lateral (100)
+        # Izquierda: Empalma desde el frente (20) hasta el lateral (100)
         left_ranges = msg.ranges[20:100]
-        
-        # Derecha: empalma desde el lateral (260) hasta donde empieza el frente (340)
+        # Derecha: Empalma desde el lateral (260) hasta el frente (340)
         right_ranges = msg.ranges[260:340]
 
-        # Guardamos la distancia mínima detectada en cada región
+        # 3. Guardamos la distancia mínima
         self.regions['front'] = min(min([self.clean_distance(x) for x in front_ranges]), 3.0)
         self.regions['left'] = min(min([self.clean_distance(x) for x in left_ranges]), 3.0)
         self.regions['right'] = min(min([self.clean_distance(x) for x in right_ranges]), 3.0)
