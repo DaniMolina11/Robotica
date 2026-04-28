@@ -30,9 +30,9 @@ class MazeSolver(Node):
         self.meta_alcanzada = False
         
         # --- CONFIGURACIÓN DE LA META ---
-        # Ajusta estos valores según las coordenadas que encontraste en Gazebo
-        self.META_X = 2.0 
-        self.META_Y = 2.0 
+        # Valores obtenidos simulando con el 1.1 y ajustados para el entorno del 1.2
+        self.META_X = 2.75 
+        self.META_Y = 1.71 
         self.DISTANCIA_MINIMA_META = 0.25
 
     def clean_distance(self, distance):
