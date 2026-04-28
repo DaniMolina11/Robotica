@@ -42,12 +42,15 @@ class MazeSolver(Node):
         return distance
 
     def scan_callback(self, msg):
-        # Ampliamos los rangos de visión para detectar esquinas laterales y evitar bloqueos
+        # Visión continua sin puntos ciegos
         # Frente: de -20 a +20 grados
         front_ranges = msg.ranges[0:20] + msg.ranges[340:359]
-        # Lados: conos de visión más amplios (90 grados cada uno)
-        left_ranges = msg.ranges[45:135]
-        right_ranges = msg.ranges[225:315]
+        
+        # Izquierda: empalma justo donde acaba el frente (20) hasta el lateral (100)
+        left_ranges = msg.ranges[20:100]
+        
+        # Derecha: empalma desde el lateral (260) hasta donde empieza el frente (340)
+        right_ranges = msg.ranges[260:340]
 
         # Guardamos la distancia mínima detectada en cada región
         self.regions['front'] = min(min([self.clean_distance(x) for x in front_ranges]), 3.0)
