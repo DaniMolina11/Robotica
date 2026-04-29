@@ -42,20 +42,14 @@ class MazeSolver(Node):
         return distance
 
     def scan_callback(self, msg):
-        # 1. ESCUDO DE SEGURIDAD: Evita que el programa explote si Gazebo 
-        # envía un escaneo vacío al arrancar o estar pausado.
         if not msg.ranges or len(msg.ranges) < 360:
             return
 
-        # 2. VISIÓN AMPLIADA (Sin puntos ciegos)
-        # Frente: de -20 a +20 grados
-        front_ranges = msg.ranges[0:20] + msg.ranges[340:359]
-        # Izquierda: Empalma desde el frente (20) hasta el lateral (100)
-        left_ranges = msg.ranges[20:100]
-        # Derecha: Empalma desde el lateral (260) hasta el frente (340)
-        right_ranges = msg.ranges[260:340]
+        # Visión frontal mucho más ancha (-30 a 30 grados) para no precipitarse en las esquinas
+        front_ranges = msg.ranges[0:30] + msg.ranges[330:359]
+        left_ranges = msg.ranges[30:110]
+        right_ranges = msg.ranges[250:330]
 
-        # 3. Guardamos la distancia mínima
         self.regions['front'] = min(min([self.clean_distance(x) for x in front_ranges]), 3.0)
         self.regions['left'] = min(min([self.clean_distance(x) for x in left_ranges]), 3.0)
         self.regions['right'] = min(min([self.clean_distance(x) for x in right_ranges]), 3.0)
@@ -74,7 +68,6 @@ class MazeSolver(Node):
     def control_loop(self):
         twist = Twist()
 
-        # Si el robot llega a la zona de meta, se detiene
         if self.meta_alcanzada:
             self.get_logger().info('¡META ALCANZADA! Deteniendo el robot.')
             twist.linear.x = 0.0
@@ -82,35 +75,30 @@ class MazeSolver(Node):
             self.cmd_pub.publish(twist)
             return
 
-        # Definimos distancias de seguridad para maniobrar
+        # Ajuste fino de distancias
         dist_seguridad = 0.45 
-        dist_critica = 0.28 # Umbral para evitar colisiones laterales en curvas cerradas
+        dist_critica = 0.25 # Distancia para rebotar de la pared derecha
 
-        # Lógica de navegación: Seguidor de pared derecha mejorada
-        if self.regions['front'] > dist_seguridad:
+        # --- NUEVA LÓGICA MÁS ESTRICTA ---
+        if self.regions['front'] < dist_seguridad:
+            # 1. OBSTÁCULO ENFRENTE: Prioridad absoluta dar la curva
+            twist.linear.x = 0.0
+            twist.angular.z = 0.5 # Girar a la izquierda sobre sí mismo
+            
+        else:
+            # 2. FRENTE LIBRE: Lógica de mantener la pared a la derecha
             if self.regions['right'] < dist_critica:
-                # Demasiado cerca de la derecha: corregir alejándose un poco hacia la izquierda
-                twist.linear.x = 0.12
-                twist.angular.z = 0.3 
+                # Nos estamos chocando con la derecha -> volantazo a la izquierda
+                twist.linear.x = 0.1
+                twist.angular.z = 0.4 
             elif self.regions['right'] < dist_seguridad:
-                # Distancia óptima: avanzar recto siguiendo la pared
+                # Distancia perfecta -> ir recto y rápido
                 twist.linear.x = 0.15
                 twist.angular.z = 0.0
             else:
-                # Se aleja de la pared: girar suavemente a la derecha para recuperarla
+                # Nos alejamos de la pared -> buscarla girando a la derecha
                 twist.linear.x = 0.12
-                twist.angular.z = -0.3
-        else:
-            # Obstáculo frontal: detener avance y elegir dirección de giro
-            twist.linear.x = 0.0
-            if self.regions['left'] > dist_seguridad:
-                # Prioridad giro a la izquierda si el frente está bloqueado
-                twist.angular.z = 0.5
-            elif self.regions['right'] > dist_seguridad:
-                twist.angular.z = -0.5
-            else:
-                # Callejón sin salida: giro de emergencia rápido
-                twist.angular.z = 0.8
+                twist.angular.z = -0.4
 
         self.cmd_pub.publish(twist)
 
