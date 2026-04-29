@@ -62,25 +62,34 @@ class MazeSolver(Node):
             self.cmd_pub.publish(twist)
             return
 
-        dist_seguridad = 0.45 
-        dist_critica = 0.25 
+        # Simplificamos las variables para que sea más fácil de leer
+        d_front = self.regions['front']
+        d_right = self.regions['right']
 
-        # Lógica estricta antibloqueos
-        if self.regions['front'] < dist_seguridad:
+        # --- LÓGICA ANTI-TEMBLEQUE ---
+        
+        # 1. Aumentamos la distancia frontal para que empiece a girar antes de tragarse la esquina
+        if d_front < 0.50:
+            # PELIGRO FRONTAL: Olvida todo y gira a la izquierda rápidamente
             twist.linear.x = 0.0
-            twist.angular.z = 0.5 
+            twist.angular.z = 0.6 
+            
         else:
-            if self.regions['right'] < dist_critica:
-                twist.linear.x = 0.1
+            # 2. FRENTE LIBRE: Control de la pared derecha
+            if d_right < 0.30:
+                # Nos chocamos por la derecha -> Volantazo suave a la izquierda
+                twist.linear.x = 0.12
                 twist.angular.z = 0.4 
-            elif self.regions['right'] < dist_seguridad:
-                twist.linear.x = 0.15
-                twist.angular.z = 0.0
-            else:
+            elif d_right > 0.65:
+                # Hemos perdido la pared derecha por completo -> La buscamos
                 twist.linear.x = 0.12
                 twist.angular.z = -0.4
+            else:
+                # ZONA NEUTRA (entre 0.30m y 0.65m): ¡Tira recto!
+                # Esto es lo que rompe el bucle de oscilación en las curvas
+                twist.linear.x = 0.15
+                twist.angular.z = 0.0
 
-        # Comando correcto (twist, no msg)
         self.cmd_pub.publish(twist)
 
 def main(args=None):
