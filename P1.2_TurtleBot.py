@@ -14,13 +14,12 @@ class MazeSolver(Node):
         self.cmd_pub = self.create_publisher(Twist, '/cmd_vel', 10)
         self.scan_sub = self.create_subscription(LaserScan, '/scan', self.scan_callback, 10)
         self.odom_sub = self.create_subscription(Odometry, '/odom', self.odom_callback, 10)
-        
         self.timer = self.create_timer(0.1, self.control_loop)
         
         self.regions = {'front': 0.0, 'right': 0.0, 'left': 0.0}
         self.meta_alcanzada = False
         
-        # Coordenadas exactas de la meta que encontraste con el odómetro
+        # Coordenadas exactas de la meta
         self.META_X = 2.75 
         self.META_Y = 1.71 
         self.DISTANCIA_MINIMA_META = 0.25
@@ -31,11 +30,9 @@ class MazeSolver(Node):
         return distance
 
     def scan_callback(self, msg):
-        # Evita cuelgues si Gazebo envía datos vacíos
         if not msg.ranges or len(msg.ranges) < 360:
             return
 
-        # Visión ampliada para esquinas perfectas
         front_ranges = msg.ranges[0:30] + msg.ranges[330:359]
         left_ranges = msg.ranges[30:110]
         right_ranges = msg.ranges[250:330]
@@ -62,31 +59,29 @@ class MazeSolver(Node):
             self.cmd_pub.publish(twist)
             return
 
-        # Simplificamos las variables para que sea más fácil de leer
+        # Simplificamos las lecturas
         d_front = self.regions['front']
         d_right = self.regions['right']
 
-        # --- LÓGICA ANTI-TEMBLEQUE ---
+        # --- LÓGICA CALIBRADA PARA PASILLOS ESTRECHOS ---
         
-        # 1. Aumentamos la distancia frontal para que empiece a girar antes de tragarse la esquina
-        if d_front < 0.50:
-            # PELIGRO FRONTAL: Olvida todo y gira a la izquierda rápidamente
+        if d_front < 0.35:
+            # PELIGRO FRONTAL: Girar a la izquierda rotando en el sitio (linear.x = 0.0)
             twist.linear.x = 0.0
             twist.angular.z = 0.6 
             
         else:
-            # 2. FRENTE LIBRE: Control de la pared derecha
-            if d_right < 0.30:
-                # Nos chocamos por la derecha -> Volantazo suave a la izquierda
-                twist.linear.x = 0.12
+            # FRENTE LIBRE: Mantenerse a la distancia correcta de la derecha
+            if d_right < 0.20:
+                # Muy pegado a la pared -> girar a la izquierda
+                twist.linear.x = 0.1
                 twist.angular.z = 0.4 
-            elif d_right > 0.65:
-                # Hemos perdido la pared derecha por completo -> La buscamos
-                twist.linear.x = 0.12
+            elif d_right > 0.35:
+                # Muy lejos de la pared -> girar a la derecha
+                twist.linear.x = 0.1
                 twist.angular.z = -0.4
             else:
-                # ZONA NEUTRA (entre 0.30m y 0.65m): ¡Tira recto!
-                # Esto es lo que rompe el bucle de oscilación en las curvas
+                # ZONA NEUTRA IDEAL (20cm - 35cm): ir en línea recta sin pensar
                 twist.linear.x = 0.15
                 twist.angular.z = 0.0
 
@@ -103,7 +98,6 @@ def main(args=None):
     except Exception as e:
         print(f"Error detectado durante la ejecución: {e}")
     finally:
-        # Cierre seguro modificado para evitar errores secundarios al apagar
         if rclpy.ok():
             try:
                 twist = Twist()
