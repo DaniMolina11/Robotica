@@ -59,31 +59,30 @@ class MazeSolver(Node):
             self.cmd_pub.publish(twist)
             return
 
-        # Simplificamos las lecturas
         d_front = self.regions['front']
         d_right = self.regions['right']
 
-        # --- LÓGICA CALIBRADA PARA PASILLOS ESTRECHOS ---
-        
-        if d_front < 0.35:
-            # PELIGRO FRONTAL: Girar a la izquierda rotando en el sitio (linear.x = 0.0)
+        if d_front < 0.40:
+            # PELIGRO FRONTAL: Sigue siendo prioritario frenar y dar la curva cerrada
             twist.linear.x = 0.0
             twist.angular.z = 0.6 
-            
         else:
-            # FRENTE LIBRE: Mantenerse a la distancia correcta de la derecha
-            if d_right < 0.20:
-                # Muy pegado a la pared -> girar a la izquierda
-                twist.linear.x = 0.1
-                twist.angular.z = 0.4 
-            elif d_right > 0.35:
-                # Muy lejos de la pared -> girar a la derecha
-                twist.linear.x = 0.1
-                twist.angular.z = -0.4
-            else:
-                # ZONA NEUTRA IDEAL (20cm - 35cm): ir en línea recta sin pensar
-                twist.linear.x = 0.15
-                twist.angular.z = 0.0
+            # FRENTE LIBRE: Activamos el piloto automático suave
+            twist.linear.x = 0.12 # Velocidad constante hacia adelante
+            
+            # --- CONTROL PROPORCIONAL ANTI-ZIGZAG ---
+            distancia_ideal = 0.30 # Queremos ir a 30 cm de la pared exactamente
+            
+            # Calculamos el error (positivo si nos acercamos a la pared, negativo si nos alejamos)
+            error = distancia_ideal - d_right 
+            
+            # Multiplicamos el error para mover el volante proporcionalmente
+            giro = error * 2.5 
+            
+            # Limitamos el giro máximo a 0.6 para que no haga trompos si pierde la pared
+            giro = max(min(giro, 0.6), -0.6) 
+            
+            twist.angular.z = giro
 
         self.cmd_pub.publish(twist)
 
