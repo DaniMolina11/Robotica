@@ -16,7 +16,7 @@ DIST_FRENAR            = 0.55
 DIST_PARED_DERECHA     = 0.25   
 DIST_PASILLO           = 0.45   
 DIST_ESQUINA_CERRADA   = 0.20   
-DIST_SEGURIDAD_TRASERA = 0.15   # Margen de seguridad optimizado para la trasera
+DIST_SEGURIDAD_TRASERA = 0.15   
 
 VEL_LINEAR_PASILLO    = 0.06
 VEL_LINEAR_NORMAL     = 0.08
@@ -117,6 +117,15 @@ class MazeSolver(Node):
     def promedio(self, buf):
         return sum(buf) / len(buf) if buf else 3.0
 
+    def reset_filtros(self):
+        self.buf_front.clear()
+        self.buf_right.clear()
+        self.buf_left.clear()
+        self.buf_back.clear()
+        self.buf_diag_izq.clear()
+        self.buf_diag_der.clear()
+        self.lecturas_acumuladas = 0
+
     def velocidad_frenada(self, d_front, vel_max):
         if d_front >= DIST_FRENAR:
             return vel_max
@@ -198,29 +207,32 @@ class MazeSolver(Node):
         d_r = self.d_right
         d_l = self.d_left
 
+        ahoraStr = time.strftime('%H:%M:%S')
         ahora          = time.time()
         tiempo_girando = ahora - self.tiempo_inicio_giro
         en_pasillo     = (d_r < DIST_PASILLO and d_l < DIST_PASILLO)
 
-        # --- TU IDEA INYECTADA AQUÍ: DETECCIÓN BLINDADA ---
-        # Solo comprobamos si es callejón muerto si el robot está en línea recta ('avanzar' o 'pasillo')
-        # Si está girando, la regla se ignora por completo y nos ahorramos los falsos positivos.
+        # --- REGLA PROTEGIDA EN LÍNEA RECTA ---
         if self.estado in ('avanzar', 'pasillo'):
+            # Ajustado a 0.24 para capturar el callejón con suficiente margen
             callejon_muerto = (d_f <= 0.24 and d_l < 0.30 and d_r < 0.30)
             if callejon_muerto:
                 self._cambiar_estado('retroceder', 'callejon detectado (frente y laterales bloqueados)')
                 self.giro_comprometido = False
+                self.reset_filtros()  # NUEVO: Vaciamos los buffers antiguos para que el láser responda al milisegundo
+                return
 
-        # Al igual que el callejón, el seguro crítico de esquina se limita a cuando avanza recto
         if self.estado in ('avanzar', 'pasillo'):
             esquina_cerrada = (d_f < DIST_ESQUINA_CERRADA and
                                d_r < DIST_ESQUINA_CERRADA + 0.05 and
                                d_l < DIST_ESQUINA_CERRADA + 0.05)
-            if esquina_cerrada and self.estado != 'retroceder':
+            if esquina_cerrada:
                 self._cambiar_estado('retroceder', 'emergencia: esquina cerrada')
                 self.giro_comprometido = False
+                self.reset_filtros()
+                return
 
-        # --- MÁQUINA DE ESTADOS ORIGINAL ---
+        # --- MÁQUINA DE ESTADOS ---
         if self.estado == 'pasillo':
             if en_pasillo:
                 self.ticks_fuera_pasillo = 0
@@ -240,7 +252,7 @@ class MazeSolver(Node):
                 self._iniciar_giro(ahora)
 
         elif self.estado == 'retroceder':
-            # Retrocede hasta que cualquiera de los sensores laterales registre vacío (>0.40m)
+            # Buscamos la salida del callejón basándonos en datos instantáneos limpios
             if self.d_left > 0.40 or self.d_right > 0.40:
                 lado = 'izq' if self.d_left > self.d_right else 'der'
                 self._cambiar_estado(f'girar_{lado}', f'salida trasera encontrada hacia {lado}')
@@ -273,10 +285,10 @@ class MazeSolver(Node):
                 twist.linear.x = -VEL_RETROCESO
             else:
                 twist.linear.x = 0.0
-            # INVERSIÓN DE SIGNO: Control angular proporcional invertido (-KP) para auto-centrarse de culo
-            error_retroceso = self.d_left - self.d_right
-            twist.angular.z = max(min(-KP * error_retroceso, 0.30), -0.30)
-            evento = f'retrocediendo_centrado B={self.d_back:.2f} err={error_retroceso:.2f}'
+            # NUEVO: Bloqueamos el giro angular a 0.0 de forma estricta.
+            # Al no balancear las ruedas de lado a lado con retardos, el robot clava una línea recta perfecta.
+            twist.angular.z = 0.0  
+            evento = f'retrocediendo_recto_puro B={self.d_back:.2f}'
             
         elif self.estado == 'escape':
             twist.linear.x  = -0.05
