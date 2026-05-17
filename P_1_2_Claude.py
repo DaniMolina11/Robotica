@@ -16,7 +16,7 @@ DIST_FRENAR            = 0.55
 DIST_PARED_DERECHA     = 0.25   
 DIST_PASILLO           = 0.45   
 DIST_ESQUINA_CERRADA   = 0.20   
-DIST_SEGURIDAD_TRASERA = 0.15   # Optimizado para apurar la trasera sin chocar
+DIST_SEGURIDAD_TRASERA = 0.15   # Margen de seguridad optimizado para la trasera
 
 VEL_LINEAR_PASILLO    = 0.06
 VEL_LINEAR_NORMAL     = 0.08
@@ -202,15 +202,26 @@ class MazeSolver(Node):
         tiempo_girando = ahora - self.tiempo_inicio_giro
         en_pasillo     = (d_r < DIST_PASILLO and d_l < DIST_PASILLO)
 
-        # --- REGLA CORREGIDA DE CALLEJÓN ---
-        # Subido el frente a 0.22 para reaccionar CON TIEMPO y MARGEN físico para no chocar
-        callejon_muerto = (d_f <= 0.22 and d_l < 0.30 and d_r < 0.30)
+        # --- TU IDEA INYECTADA AQUÍ: DETECCIÓN BLINDADA ---
+        # Solo comprobamos si es callejón muerto si el robot está en línea recta ('avanzar' o 'pasillo')
+        # Si está girando, la regla se ignora por completo y nos ahorramos los falsos positivos.
+        if self.estado in ('avanzar', 'pasillo'):
+            callejon_muerto = (d_f <= 0.24 and d_l < 0.30 and d_r < 0.30)
+            if callejon_muerto:
+                self._cambiar_estado('retroceder', 'callejon detectado (frente y laterales bloqueados)')
+                self.giro_comprometido = False
 
-        if callejon_muerto and self.estado not in ('retroceder', 'escape'):
-            self._cambiar_estado('retroceder', 'callejon detectado (frente y laterales bloqueados)')
-            self.giro_comprometido = False
+        # Al igual que el callejón, el seguro crítico de esquina se limita a cuando avanza recto
+        if self.estado in ('avanzar', 'pasillo'):
+            esquina_cerrada = (d_f < DIST_ESQUINA_CERRADA and
+                               d_r < DIST_ESQUINA_CERRADA + 0.05 and
+                               d_l < DIST_ESQUINA_CERRADA + 0.05)
+            if esquina_cerrada and self.estado != 'retroceder':
+                self._cambiar_estado('retroceder', 'emergencia: esquina cerrada')
+                self.giro_comprometido = False
 
-        elif self.estado == 'pasillo':
+        # --- MÁQUINA DE ESTADOS ORIGINAL ---
+        if self.estado == 'pasillo':
             if en_pasillo:
                 self.ticks_fuera_pasillo = 0
                 if d_f < DIST_GIRO_PASILLO:
@@ -229,6 +240,7 @@ class MazeSolver(Node):
                 self._iniciar_giro(ahora)
 
         elif self.estado == 'retroceder':
+            # Retrocede hasta que cualquiera de los sensores laterales registre vacío (>0.40m)
             if self.d_left > 0.40 or self.d_right > 0.40:
                 lado = 'izq' if self.d_left > self.d_right else 'der'
                 self._cambiar_estado(f'girar_{lado}', f'salida trasera encontrada hacia {lado}')
@@ -261,7 +273,7 @@ class MazeSolver(Node):
                 twist.linear.x = -VEL_RETROCESO
             else:
                 twist.linear.x = 0.0
-            # INVERSIÓN CINEMÁTICA CORREGIDA: Signo negativo (-) añadido para corregir el rumbo yendo hacia atrás
+            # INVERSIÓN DE SIGNO: Control angular proporcional invertido (-KP) para auto-centrarse de culo
             error_retroceso = self.d_left - self.d_right
             twist.angular.z = max(min(-KP * error_retroceso, 0.30), -0.30)
             evento = f'retrocediendo_centrado B={self.d_back:.2f} err={error_retroceso:.2f}'
