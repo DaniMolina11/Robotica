@@ -9,19 +9,20 @@ import math
 import time
 from collections import deque
 
-# --- PARÁMETROS DE DISTANCIA AJUSTADOS ---
-DIST_GIRO_PASILLO      = 0.24   # Margen antes de esquina cerrada
-DIST_PARAR_GIRO        = 0.28   
+# --- PARÁMETROS DE DISTANCIA AJUSTADOS PARA GIRO EN ARCO ---
+DIST_GIRO_PASILLO      = 0.25   # Aumentado para dar espacio al arco
+DIST_PARAR_GIRO        = 0.30   # Aumentado para no chocar de frente al avanzar girando
 DIST_FRENAR            = 0.55   
 DIST_PARED_DERECHA     = 0.25   
 DIST_PASILLO           = 0.45   
-DIST_ESQUINA_CERRADA   = 0.20   # Mínimo absoluto (radio del robot)
-DIST_SEGURIDAD_TRASERA = 0.25   # NUEVO: Distancia mínima para poder ir hacia atrás
+DIST_ESQUINA_CERRADA   = 0.20   
+DIST_SEGURIDAD_TRASERA = 0.25   
 
 VEL_LINEAR_PASILLO    = 0.06
 VEL_LINEAR_NORMAL     = 0.08
 VEL_RETROCESO         = 0.05
 VEL_GIRO              = 0.38
+VEL_AVANCE_GIRO       = 0.02   # NUEVO: Avance constante durante el giro de esquinas
 KP                    = 1.2
 
 TIEMPO_GIRO_MINIMO    = 1.5
@@ -79,11 +80,9 @@ class MazeSolver(Node):
         self.log_file = open(LOG_FILE, 'w')
         self._log_raw('=== INICIO SESION MAZE SOLVER ===')
         self._log_raw(
-            f'Params: DIST_GIRO_PASILLO={DIST_GIRO_PASILLO} DIST_PARAR={DIST_PARAR_GIRO} '
-            f'DIST_FRENAR={DIST_FRENAR} DIST_PASILLO={DIST_PASILLO} '
-            f'VEL_PASILLO={VEL_LINEAR_PASILLO} VEL_NORMAL={VEL_LINEAR_NORMAL} '
-            f'VEL_GIRO={VEL_GIRO} KP={KP} T_GIRO={TIEMPO_GIRO_MINIMO} '
-            f'DIST_SEGURIDAD_TRASERA={DIST_SEGURIDAD_TRASERA}'
+            f'Params: DIST_GIRO={DIST_GIRO_PASILLO} DIST_PARAR={DIST_PARAR_GIRO} '
+            f'VEL_NORMAL={VEL_LINEAR_NORMAL} VEL_GIRO={VEL_GIRO} '
+            f'VEL_AVANCE_GIRO={VEL_AVANCE_GIRO} KP={KP}'
         )
         self._log_raw(
             'TSIM      | POS_X  | POS_Y  | ESTADO       | '
@@ -248,16 +247,17 @@ class MazeSolver(Node):
                 if tiempo_girando >= TIEMPO_GIRO_MINIMO:
                     self.giro_comprometido = False
             else:
+                # Modificado: Se añade +0.10 a DIST_PARAR_GIRO porque el arco nos ha acercado un poco
                 if d_f >= DIST_PARAR_GIRO + 0.10:
                     self._cambiar_estado('avanzar', f'frente libre d_f={d_f:.2f}')
-                elif d_f < DIST_PARAR_GIRO:
+                elif d_f < DIST_PARAR_GIRO - 0.05: # Margen de seguridad por si el arco apura demasiado
                     self._iniciar_giro(ahora)
 
         elif self.estado == 'escape':
             if d_f > DIST_PARAR_GIRO + 0.15:
                 self._cambiar_estado('avanzar', 'escape completado')
 
-        # --- APLICACIÓN DE VELOCIDADES CON PROTECCIÓN TRASERA ---
+        # --- APLICACIÓN DE VELOCIDADES ---
         evento = ''
         if self.estado == 'pasillo':
             twist.linear.x  = VEL_LINEAR_PASILLO
@@ -268,7 +268,7 @@ class MazeSolver(Node):
             if self.d_back > DIST_SEGURIDAD_TRASERA:
                 twist.linear.x = -VEL_RETROCESO
             else:
-                twist.linear.x = 0.0  # Freno para no chocar atrás
+                twist.linear.x = 0.0
             twist.angular.z = 0.0
             evento = f'retrocediendo t={tiempo_retro:.1f}s B={self.d_back:.2f}'
             
@@ -276,19 +276,21 @@ class MazeSolver(Node):
             if self.d_back > DIST_SEGURIDAD_TRASERA:
                 twist.linear.x = -0.05
             else:
-                twist.linear.x = 0.0  # Freno para no chocar atrás
+                twist.linear.x = 0.0
             twist.angular.z = VEL_GIRO
             evento = f'escape B={self.d_back:.2f}'
             
         elif self.estado == 'girar_izq':
-            twist.linear.x  = 0.0
+            # NUEVO: VEL_AVANCE_GIRO para hacer un arco y no engancharse
+            twist.linear.x  = VEL_AVANCE_GIRO
             twist.angular.z = VEL_GIRO
-            evento = f'girar_izq t={tiempo_girando:.1f}s comp={self.giro_comprometido}'
+            evento = f'girar_izq arco t={tiempo_girando:.1f}s comp={self.giro_comprometido}'
             
         elif self.estado == 'girar_der':
-            twist.linear.x  = 0.0
+            # NUEVO: VEL_AVANCE_GIRO para hacer un arco y no engancharse
+            twist.linear.x  = VEL_AVANCE_GIRO
             twist.angular.z = -VEL_GIRO
-            evento = f'girar_der t={tiempo_girando:.1f}s comp={self.giro_comprometido}'
+            evento = f'girar_der arco t={tiempo_girando:.1f}s comp={self.giro_comprometido}'
             
         else:  # avanzar
             vel = self.velocidad_frenada(d_f, VEL_LINEAR_NORMAL)
