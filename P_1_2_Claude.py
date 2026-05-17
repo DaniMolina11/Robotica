@@ -9,9 +9,9 @@ import math
 import time
 from collections import deque
 
-# --- PARÁMETROS DE DISTANCIA ---
-DIST_GIRO_PASILLO      = 0.26   # Empezar un poco antes para dar espacio al arco ancho
-DIST_PARAR_GIRO        = 0.28
+# --- PARÁMETROS DE DISTANCIA PARA ARCO MUY ABIERTO ---
+DIST_GIRO_PASILLO      = 0.32   # Empezar mucho antes para tener espacio físico para el arco
+DIST_PARAR_GIRO        = 0.32
 DIST_FRENAR            = 0.55   
 DIST_PARED_DERECHA     = 0.25   
 DIST_PASILLO           = 0.45   
@@ -21,8 +21,8 @@ DIST_SEGURIDAD_TRASERA = 0.25
 VEL_LINEAR_PASILLO    = 0.06
 VEL_LINEAR_NORMAL     = 0.08
 VEL_RETROCESO         = 0.05
-VEL_GIRO              = 0.35   # Ligeramente menor para abrir más la curva
-VEL_AVANCE_GIRO       = 0.04   # El doble de rápido para que el arco sea amplio
+VEL_GIRO              = 0.28   # Más bajo = curva más suave y abierta
+VEL_AVANCE_GIRO       = 0.06   # Más alto = curva más larga y abierta
 KP                    = 1.2
 
 TIEMPO_GIRO_MINIMO    = 1.5
@@ -280,13 +280,12 @@ class MazeSolver(Node):
             evento = f'escape_recto B={self.d_back:.2f}'
             
         elif self.estado == 'girar_izq':
-            # Permite mantener el arco hasta estar a 0.22m del frontal para no convertirlo en rotación estática
+            # Mantenemos el arco abierto hasta acercarnos peligrosamente (0.22m) al muro frontal
             twist.linear.x  = VEL_AVANCE_GIRO if d_f > 0.22 else 0.0
             twist.angular.z = VEL_GIRO
             evento = f'girar_izq arco={twist.linear.x>0} t={tiempo_girando:.1f}s'
             
         elif self.estado == 'girar_der':
-            # Permite mantener el arco hasta estar a 0.22m del frontal para no convertirlo en rotación estática
             twist.linear.x  = VEL_AVANCE_GIRO if d_f > 0.22 else 0.0
             twist.angular.z = -VEL_GIRO
             evento = f'girar_der arco={twist.linear.x>0} t={tiempo_girando:.1f}s'
