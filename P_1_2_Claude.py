@@ -1,98 +1,97 @@
-
 #!/usr/bin/env python3
 
 import rclpy
 from rclpy.node import Node
+from geometry_msgs.msg import Twist
 from sensor_msgs.msg import LaserScan
 from nav_msgs.msg import Odometry
-from geometry_msgs.msg import Twist
 import math
 
-# Umbrales de distancia (en metros)
-DIST_FRENTE = 0.35    # Si hay pared a menos de esto, girar
-DIST_DERECHA = 0.35   # Distancia objetivo a la pared derecha
-
-# Velocidades
-VEL_LINEAR = 0.10
-VEL_ANGULAR = 0.5
-
-# Posición de salida del laberinto (ajustar con odometría)
-META_X = 0.0   # ← lo encontrarás llevando el robot manualmente a la salida
-META_Y = 0.0
-DIST_META = 0.3  # radio de llegada
-
-class LaberintSolver(Node):
+class MazeSolver(Node):
     def __init__(self):
-        super().__init__('laberint_solver')
-        
-        # Publicador de velocidades
-        self.pub = self.create_publisher(Twist, 'cmd_vel', 10)
-        
-        # Suscriptores
-        self.create_subscription(LaserScan, 'scan', self.callback_scan, 10)
-        self.create_subscription(Odometry, 'odom', self.callback_odom, 10)
-        
-        # Estado
-        self.dist_frente = float('inf')
-        self.dist_derecha = float('inf')
-        self.pos_x = 0.0
-        self.pos_y = 0.0
+        super().__init__('maze_solver_node')
+
+        self.cmd_pub = self.create_publisher(Twist, '/cmd_vel', 10)
+        self.scan_sub = self.create_subscription(LaserScan, '/scan', self.scan_callback, 10)
+        self.odom_sub = self.create_subscription(Odometry, '/odom', self.odom_callback, 10)
+        self.timer = self.create_timer(0.1, self.control_loop)
+
+        self.regions = {'front': 3.0, 'right': 3.0, 'left': 3.0}
         self.meta_alcanzada = False
 
-    def callback_scan(self, msg):
-        ranges = msg.ranges
-        
-        # Extraer distancias relevantes (media de varios grados para robustez)
-        self.dist_frente  = min(ranges[355:360] + ranges[0:5])
-        self.dist_derecha = min(ranges[265:275])
-        # También útil: izquierda = ranges[85:95]
-        
-        if not self.meta_alcanzada:
-            self.navegar()
+        # Coordenadas de la meta (tomadas del codigo anterior)
+        self.META_X = 2.75
+        self.META_Y = 1.71
+        self.DISTANCIA_MINIMA_META = 0.25
 
-    def callback_odom(self, msg):
-        self.pos_x = msg.pose.pose.position.x
-        self.pos_y = msg.pose.pose.position.y
-        
-        # Comprobar si hemos llegado a la meta
-        dist = math.sqrt((self.pos_x - META_X)**2 + (self.pos_y - META_Y)**2)
-        if dist < DIST_META:
+    def clean_distance(self, distance):
+        if math.isinf(distance) or math.isnan(distance):
+            return 3.0
+        return distance
+
+    def scan_callback(self, msg):
+        if not msg.ranges or len(msg.ranges) < 360:
+            return
+
+        front_ranges = list(msg.ranges[0:30]) + list(msg.ranges[330:360])
+        left_ranges  = list(msg.ranges[30:110])
+        right_ranges = list(msg.ranges[250:330])
+
+        self.regions['front'] = min([self.clean_distance(x) for x in front_ranges])
+        self.regions['left']  = min([self.clean_distance(x) for x in left_ranges])
+        self.regions['right'] = min([self.clean_distance(x) for x in right_ranges])
+
+    def odom_callback(self, msg):
+        current_x = msg.pose.pose.position.x
+        current_y = msg.pose.pose.position.y
+        dist_to_meta = math.sqrt(
+            (current_x - self.META_X) ** 2 +
+            (current_y - self.META_Y) ** 2
+        )
+        if dist_to_meta < self.DISTANCIA_MINIMA_META:
             self.meta_alcanzada = True
-            self.parar()
-            self.get_logger().info('¡LABERINTO RESUELTO!')
 
-    def navegar(self):
+    def control_loop(self):
         twist = Twist()
-        
-        if self.dist_frente < DIST_FRENTE:
-            # Obstáculo al frente → girar izquierda
+
+        if self.meta_alcanzada:
+            self.get_logger().info('META ALCANZADA! Deteniendo el robot.')
+            self.cmd_pub.publish(twist)
+            return
+
+        d_front = self.regions['front']
+        d_right = self.regions['right']
+
+        if d_front < 0.40:
+            # Obstaculo al frente: parar y girar a la izquierda
             twist.linear.x = 0.0
-            twist.angular.z = VEL_ANGULAR
-        elif self.dist_derecha > DIST_DERECHA * 1.5:
-            # Hemos perdido la pared derecha → girar derecha
-            twist.linear.x = VEL_LINEAR * 0.5
-            twist.angular.z = -VEL_ANGULAR * 0.5
+            twist.angular.z = 0.6
         else:
-            # Camino libre → avanzar
-            twist.linear.x = VEL_LINEAR
-            twist.angular.z = 0.0
-        
-        self.pub.publish(twist)
+            # Frente libre: avanzar con control proporcional sobre pared derecha
+            twist.linear.x = 0.12
 
-    def parar(self):
-        self.pub.publish(Twist())  # Todo a 0
+            distancia_ideal = 0.30
+            error = distancia_ideal - d_right
+            giro = error * 2.5
+            giro = max(min(giro, 0.6), -0.6)
+            twist.angular.z = giro
 
-def main():
-    rclpy.init()
-    node = LaberintSolver()
+        self.cmd_pub.publish(twist)
+
+
+def main(args=None):
+    rclpy.init(args=args)
+    nodo = MazeSolver()
     try:
-        rclpy.spin(node)
+        rclpy.spin(nodo)
     except KeyboardInterrupt:
         pass
     finally:
-        node.parar()
-        node.destroy_node()
+        twist = Twist()
+        nodo.cmd_pub.publish(twist)
+        nodo.destroy_node()
         rclpy.shutdown()
+
 
 if __name__ == '__main__':
     main()
