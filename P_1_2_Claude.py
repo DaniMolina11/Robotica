@@ -17,12 +17,17 @@ DIST_PASILLO           = 0.45
 DIST_ESQUINA_CERRADA   = 0.20   
 DIST_SEGURIDAD_TRASERA = 0.25   
 
-VEL_LINEAR_PASILLO    = 0.06
-VEL_LINEAR_NORMAL     = 0.08
+# --- VELOCIDADES REDUCIDAS PARA MAYOR CONSTANCIA ---
+VEL_LINEAR_PASILLO    = 0.05   # Bajado para movimiento más estable
+VEL_LINEAR_NORMAL     = 0.07   # Bajado para movimiento más estable
 VEL_RETROCESO         = 0.05
 VEL_GIRO              = 0.28   
 VEL_AVANCE_GIRO       = 0.06   
-KP_CENTRAR            = 1.5    # Fuerza de corrección para mantener el centro perfecto
+
+# --- CONTROL DE CENTRADO (AMORTIGUADO) ---
+KP_CENTRAR            = 0.6    # Reducido drásticamente para evitar zig-zags
+MAX_VEL_ANG_CENTRAR   = 0.15   # Límite estricto de giro angular para correcciones
+TOLERANCIA_CENTRO     = 0.015  # 1.5 cm de banda muerta: si el error es menor, va totalmente recto
 
 TIEMPO_GIRO_MINIMO    = 1.5
 N_LECTURAS_PROMEDIO   = 5
@@ -245,18 +250,18 @@ class MazeSolver(Node):
                 if d_f >= DIST_PARAR_GIRO + 0.10:
                     self._cambiar_estado('avanzar', f'frente libre d_f={d_f:.2f}')
 
-        # --- SISTEMA DE CENTRADO ABSOLUTO CON LIDAR ---
-        # Topamos la visión a 0.35m (un poco más de la mitad del pasillo real).
-        # Si un lado está vacío (ej. intersección), el robot "ve" una pared imaginaria a 0.35m.
-        # Esto hace que se aleje de la pared real sin dar volantazos exagerados.
+        # --- SISTEMA DE CENTRADO ABSOLUTO CON LIDAR (CON BANDA MUERTA) ---
         LIMITE_VISION = 0.35
         d_l_efectiva = min(d_l, LIMITE_VISION)
         d_r_efectiva = min(d_r, LIMITE_VISION)
         
-        # Error positivo (d_l > d_r) -> pegado a la derecha -> debe girar a la izquierda (+)
-        # Error negativo (d_l < d_r) -> pegado a la izquierda -> debe girar a la derecha (-)
         error_centrado = d_l_efectiva - d_r_efectiva
-        correccion_angular = max(min(KP_CENTRAR * error_centrado, 0.40), -0.40)
+        
+        # Banda muerta: Si el error es menor a la tolerancia, no corregimos
+        if abs(error_centrado) < TOLERANCIA_CENTRO:
+            correccion_angular = 0.0
+        else:
+            correccion_angular = max(min(KP_CENTRAR * error_centrado, MAX_VEL_ANG_CENTRAR), -MAX_VEL_ANG_CENTRAR)
 
         # --- APLICACIÓN DE VELOCIDADES ---
         evento = ''
