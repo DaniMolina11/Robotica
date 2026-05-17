@@ -10,20 +10,20 @@ import time
 from collections import deque
 
 # ─── PARÁMETROS AJUSTABLES ────────────────────────────────────────────────────
-DIST_OBSTACULO_FRENTE = 0.35   # Distancia mínima al frente antes de girar
+DIST_PARAR_GIRO       = 0.28   # Frente < esto → parar y girar (zona de peligro)
+DIST_FRENAR           = 0.55   # Frente < esto → empezar a frenar progresivamente
 DIST_PARED_DERECHA    = 0.25   # Distancia ideal a la pared derecha
-DIST_PASILLO          = 0.45   # Der Y Izq < esto → pasillo (pasillo real ~0.305m + margen)
-DIST_ESQUINA_CERRADA  = 0.22   # Frente+der+izq todos < esto → esquina cerrada
+DIST_PASILLO          = 0.45   # Der Y Izq < esto → pasillo
+DIST_ESQUINA_CERRADA  = 0.22   # Frente+der+izq todos < esto → escape
 
 VEL_LINEAR_PASILLO    = 0.06   # Velocidad en pasillo
 VEL_LINEAR_NORMAL     = 0.08   # Velocidad en espacio abierto
-VEL_GIRO_FUERTE       = 0.40   # Velocidad angular al girar (reducida para no volcarse)
+VEL_GIRO              = 0.38   # Velocidad angular al girar
 KP                    = 1.2    # Ganancia proporcional seguimiento de pared
 
 TIEMPO_GIRO_MINIMO    = 1.2    # Segundos mínimos girando antes de poder cambiar
-
-# Cuántas lecturas LIDAR promediar antes de actuar (más = más estable, más lento)
-N_LECTURAS_PROMEDIO   = 5
+N_LECTURAS_PROMEDIO   = 5      # Lecturas LIDAR a promediar
+TICKS_CONFIRMACION    = 4      # Ticks para confirmar salida de pasillo
 # ──────────────────────────────────────────────────────────────────────────────
 
 class MazeSolver(Node):
@@ -35,38 +35,30 @@ class MazeSolver(Node):
         self.odom_sub = self.create_subscription(Odometry,  '/odom', self.odom_callback, 10)
         self.timer    = self.create_timer(0.1, self.control_loop)
 
-        # Buffers de historial para promediar (deque descarta automáticamente los viejos)
         self.buf_front = deque(maxlen=N_LECTURAS_PROMEDIO)
         self.buf_right = deque(maxlen=N_LECTURAS_PROMEDIO)
         self.buf_left  = deque(maxlen=N_LECTURAS_PROMEDIO)
         self.buf_back  = deque(maxlen=N_LECTURAS_PROMEDIO)
 
-        # Valores suavizados (lo que usa la lógica)
         self.d_front = 3.0
         self.d_right = 3.0
         self.d_left  = 3.0
         self.d_back  = 3.0
 
-        # Cuántas lecturas tenemos ya (no actuar hasta tener N_LECTURAS_PROMEDIO)
         self.lecturas_acumuladas = 0
 
-        # Estados: 'esperando' | 'pasillo' | 'avanzar' | 'girar_izq' | 'girar_der' | 'escape'
+        # Estados: 'esperando'|'pasillo'|'avanzar'|'frenando'|'girar_izq'|'girar_der'|'escape'
         self.estado = 'esperando'
 
-        self.tiempo_inicio_giro = 0.0
-        self.giro_comprometido  = False
-
-        # Detección de fin de pasillo: contar ticks consecutivos fuera de pasillo
-        # antes de cambiar de estado (evita reaccionar a una lectura puntual)
+        self.tiempo_inicio_giro  = 0.0
+        self.giro_comprometido   = False
         self.ticks_fuera_pasillo = 0
-        self.TICKS_CONFIRMACION  = 4   # ticks consecutivos para confirmar que salimos del pasillo
 
         self.META_X               = 2.75
         self.META_Y               = 1.71
         self.DISTANCIA_MINIMA_META = 0.25
         self.meta_alcanzada       = False
 
-    # ── Utilidad ──────────────────────────────────────────────────────────────
     def clean(self, v):
         return 3.0 if (math.isinf(v) or math.isnan(v)) else float(v)
 
@@ -76,28 +68,16 @@ class MazeSolver(Node):
     def promedio(self, buf):
         return sum(buf) / len(buf) if buf else 3.0
 
-    # ── Callbacks ─────────────────────────────────────────────────────────────
     def scan_callback(self, msg):
         r = msg.ranges
         if len(r) < 360:
             return
-
-        # Leer mínimos de cada sector
-        raw_front = min(self.sector_min(r, 350, 360),
-                        self.sector_min(r,   0,  10))
-        raw_right = self.sector_min(r, 260, 310)
-        raw_left  = self.sector_min(r,  50, 110)
-        raw_back  = self.sector_min(r, 170, 190)
-
-        # Añadir al buffer histórico
-        self.buf_front.append(raw_front)
-        self.buf_right.append(raw_right)
-        self.buf_left.append(raw_left)
-        self.buf_back.append(raw_back)
-
+        self.buf_front.append(min(self.sector_min(r, 350, 360),
+                                  self.sector_min(r,   0,  10)))
+        self.buf_right.append(self.sector_min(r, 260, 310))
+        self.buf_left.append( self.sector_min(r,  50, 110))
+        self.buf_back.append( self.sector_min(r, 170, 190))
         self.lecturas_acumuladas += 1
-
-        # Calcular valores suavizados (promedio de las últimas N lecturas)
         self.d_front = self.promedio(self.buf_front)
         self.d_right = self.promedio(self.buf_right)
         self.d_left  = self.promedio(self.buf_left)
@@ -109,7 +89,19 @@ class MazeSolver(Node):
         if math.sqrt((x - self.META_X)**2 + (y - self.META_Y)**2) < self.DISTANCIA_MINIMA_META:
             self.meta_alcanzada = True
 
-    # ── Lógica principal ──────────────────────────────────────────────────────
+    def velocidad_frenada(self, d_front, vel_max):
+        """
+        Devuelve una velocidad reducida proporcionalmente a la distancia al frente.
+        Entre DIST_FRENAR y DIST_PARAR_GIRO la velocidad baja de vel_max a 0.
+        """
+        if d_front >= DIST_FRENAR:
+            return vel_max
+        if d_front <= DIST_PARAR_GIRO:
+            return 0.0
+        # Interpolación lineal entre los dos umbrales
+        ratio = (d_front - DIST_PARAR_GIRO) / (DIST_FRENAR - DIST_PARAR_GIRO)
+        return round(vel_max * ratio, 3)
+
     def control_loop(self):
         twist = Twist()
 
@@ -118,12 +110,10 @@ class MazeSolver(Node):
             self.cmd_pub.publish(twist)
             return
 
-        # Esperar a tener suficientes lecturas antes de moverse
         if self.lecturas_acumuladas < N_LECTURAS_PROMEDIO:
             self.get_logger().info(
-                f'Acumulando lecturas... {self.lecturas_acumuladas}/{N_LECTURAS_PROMEDIO}'
-            )
-            self.cmd_pub.publish(twist)  # quieto
+                f'Acumulando lecturas {self.lecturas_acumuladas}/{N_LECTURAS_PROMEDIO}')
+            self.cmd_pub.publish(twist)
             return
 
         if self.estado == 'esperando':
@@ -153,67 +143,69 @@ class MazeSolver(Node):
             self.giro_comprometido = False
 
         elif self.estado == 'pasillo':
-            if en_pasillo and d_f >= DIST_OBSTACULO_FRENTE:
-                # Seguimos en pasillo normal
+            if en_pasillo:
                 self.ticks_fuera_pasillo = 0
-
-            elif not en_pasillo:
-                # Posible salida de pasillo: confirmar con varios ticks consecutivos
+                if d_f < DIST_PARAR_GIRO:
+                    # Obstáculo al fondo del pasillo: parar y girar
+                    self._iniciar_giro(d_l, d_r, ahora)
+                # Si DIST_FRENAR > d_f > DIST_PARAR_GIRO: la frenada progresiva
+                # se aplica en la sección de acciones, seguimos en 'pasillo'
+            else:
                 self.ticks_fuera_pasillo += 1
-                if self.ticks_fuera_pasillo >= self.TICKS_CONFIRMACION:
+                if self.ticks_fuera_pasillo >= TICKS_CONFIRMACION:
                     self.get_logger().info('Salida de pasillo confirmada -> avanzar')
                     self.estado = 'avanzar'
                     self.ticks_fuera_pasillo = 0
-                # Si aún no confirmamos, seguimos en pasillo (ignoramos la lectura puntual)
-
-            elif d_f < DIST_OBSTACULO_FRENTE:
-                # Obstáculo al fondo del pasillo
-                self._iniciar_giro(d_l, d_r, ahora)
 
         elif self.estado == 'avanzar':
-            if en_pasillo and d_f >= DIST_OBSTACULO_FRENTE:
+            if en_pasillo and d_f >= DIST_PARAR_GIRO:
                 self.get_logger().info('Pasillo detectado -> modo pasillo')
                 self.estado = 'pasillo'
                 self.ticks_fuera_pasillo = 0
-            elif d_f < DIST_OBSTACULO_FRENTE:
+            elif d_f < DIST_PARAR_GIRO:
                 self._iniciar_giro(d_l, d_r, ahora)
+            # Si DIST_FRENAR > d_f > DIST_PARAR_GIRO: frenar pero seguir en 'avanzar'
 
         elif self.estado in ('girar_izq', 'girar_der'):
             if self.giro_comprometido:
                 if tiempo_girando >= TIEMPO_GIRO_MINIMO:
                     self.giro_comprometido = False
             else:
-                if d_f >= DIST_OBSTACULO_FRENTE + 0.10:
+                if d_f >= DIST_PARAR_GIRO + 0.10:
                     self.estado = 'avanzar'
-                elif d_f < DIST_OBSTACULO_FRENTE:
+                elif d_f < DIST_PARAR_GIRO:
                     self._iniciar_giro(d_l, d_r, ahora)
 
         elif self.estado == 'escape':
-            if d_f > DIST_OBSTACULO_FRENTE + 0.10:
+            if d_f > DIST_PARAR_GIRO + 0.15:
                 self.estado = 'avanzar'
 
         # ── ACCIONES ──────────────────────────────────────────────────────────
 
         if self.estado == 'pasillo':
-            twist.linear.x  = VEL_LINEAR_PASILLO
+            # Velocidad reducida progresivamente si el frente se acerca
+            vel = self.velocidad_frenada(d_f, VEL_LINEAR_PASILLO)
+            twist.linear.x  = vel
             twist.angular.z = 0.0
 
         elif self.estado == 'escape':
             twist.linear.x  = -0.05
-            twist.angular.z =  VEL_GIRO_FUERTE
+            twist.angular.z =  VEL_GIRO
 
         elif self.estado == 'girar_izq':
             twist.linear.x  = 0.0
-            twist.angular.z = VEL_GIRO_FUERTE
+            twist.angular.z = VEL_GIRO
 
         elif self.estado == 'girar_der':
             twist.linear.x  = 0.0
-            twist.angular.z = -VEL_GIRO_FUERTE
+            twist.angular.z = -VEL_GIRO
 
         else:  # avanzar
-            twist.linear.x = VEL_LINEAR_NORMAL
+            # Frenar progresivamente si el frente se acerca
+            vel = self.velocidad_frenada(d_f, VEL_LINEAR_NORMAL)
+            twist.linear.x = vel
             if d_r > 1.2:
-                twist.angular.z = -0.20  # buscar pared derecha suavemente
+                twist.angular.z = -0.20
             else:
                 error = DIST_PARED_DERECHA - d_r
                 twist.angular.z = max(min(KP * error, 0.40), -0.40)
