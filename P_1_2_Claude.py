@@ -13,7 +13,7 @@ from collections import deque
 DIST_GIRO_PASILLO      = 0.32   
 DIST_PARAR_GIRO        = 0.32
 DIST_FRENAR            = 0.55   
-DIST_PARED_DERECHA     = 0.15   # Bajado de 0.25 a 0.15 (centro exacto de un pasillo de 0.30m)
+DIST_PARED_DERECHA     = 0.15   
 DIST_PASILLO           = 0.45   
 DIST_ESQUINA_CERRADA   = 0.20   
 DIST_SEGURIDAD_TRASERA = 0.25   
@@ -24,6 +24,7 @@ VEL_RETROCESO         = 0.05
 VEL_GIRO              = 0.28   
 VEL_AVANCE_GIRO       = 0.06   
 KP                    = 1.2
+KP_CENTRAR            = 2.0    # NUEVO: Ganancia agresiva para clavarlo en el centro
 
 TIEMPO_GIRO_MINIMO    = 1.5
 N_LECTURAS_PROMEDIO   = 5
@@ -78,7 +79,7 @@ class MazeSolver(Node):
         self._log_raw('=== INICIO SESION MAZE SOLVER ===')
         self._log_raw(
             f'Params: DIST_GIRO={DIST_GIRO_PASILLO} DIST_PARAR={DIST_PARAR_GIRO} '
-            f'VEL_NORMAL={VEL_LINEAR_NORMAL} VEL_GIRO={VEL_GIRO} KP={KP}'
+            f'VEL_NORMAL={VEL_LINEAR_NORMAL} VEL_GIRO={VEL_GIRO} KP={KP} KP_CENTRAR={KP_CENTRAR}'
         )
         self._log_raw(
             'TSIM      | POS_X  | POS_Y  | ESTADO       | '
@@ -203,7 +204,6 @@ class MazeSolver(Node):
 
         en_pasillo      = (d_r < DIST_PASILLO and d_l < DIST_PASILLO)
         
-        # Cualquier callejón muerto o bloqueo cerrado dispara la retirada hacia atrás pura
         callejon_muerto = (en_pasillo and d_f <= DIST_GIRO_PASILLO + 0.05 and 
                            self.d_diag_izq < 0.30 and self.d_diag_der < 0.30)
         esquina_cerrada = (d_f < DIST_ESQUINA_CERRADA and
@@ -233,8 +233,6 @@ class MazeSolver(Node):
                 self._iniciar_giro(ahora)
 
         elif self.estado == 'retroceder':
-            # Retrocede en línea recta HASTA salir del callejón.
-            # Sabremos que ha salido cuando un sensor lateral detecte un hueco de intersección.
             if self.d_left > 0.45 or self.d_right > 0.45:
                 lado = 'izq' if self.d_left > self.d_right else 'der'
                 self._cambiar_estado(f'girar_{lado}', f'interseccion abierta encontrada hacia {lado}')
@@ -254,10 +252,10 @@ class MazeSolver(Node):
         
         if self.estado == 'pasillo':
             twist.linear.x  = VEL_LINEAR_PASILLO
-            # Centrado dinámico activo incluso en modo pasillo para no desviarse
+            # Centrado dinámico sin amortiguar y con KP agresivo
             if d_r < DIST_PASILLO and d_l < DIST_PASILLO:
-                error = (d_l - d_r) * 0.5
-                twist.angular.z = max(min(KP * error, 0.40), -0.40)
+                error = d_l - d_r
+                twist.angular.z = max(min(KP_CENTRAR * error, 0.40), -0.40)
             else:
                 twist.angular.z = 0.0
             evento = f'pasillo_recto f={d_f:.2f}'
@@ -267,7 +265,6 @@ class MazeSolver(Node):
                 twist.linear.x = -VEL_RETROCESO
             else:
                 twist.linear.x = 0.0
-            # Marcha atrás estrictamente recta sin giros absurdos
             twist.angular.z = 0.0
             evento = f'retrocediendo_recto B={self.d_back:.2f}'
             
@@ -288,17 +285,17 @@ class MazeSolver(Node):
             twist.linear.x = vel
             
             if d_r < DIST_PASILLO and d_l < DIST_PASILLO:
-                # Centrado dinámico perfecto (usa la diferencia entre ambas paredes)
-                error = (d_l - d_r) * 0.5
-                twist.angular.z = max(min(KP * error, 0.40), -0.40)
+                # Centrado dinámico perfecto
+                error = d_l - d_r
+                twist.angular.z = max(min(KP_CENTRAR * error, 0.40), -0.40)
                 evento = f'centrando_dinamico err={error:.3f} vel={vel:.3f}'
             elif d_r < 1.2:
-                # Solo ve pared derecha (ej. saliendo de curva amplia)
+                # Solo ve pared derecha
                 error = DIST_PARED_DERECHA - d_r
                 twist.angular.z = max(min(KP * error, 0.40), -0.40)
                 evento = f'siguiendo_pared_der err={error:.3f} vel={vel:.3f}'
             else:
-                # Pérdida total de paredes, busca suavemente a la derecha
+                # Pérdida total de paredes
                 twist.angular.z = -0.20
                 evento = f'buscando_pared vel={vel:.3f}'
                 
