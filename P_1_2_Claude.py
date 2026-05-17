@@ -6,13 +6,17 @@ from geometry_msgs.msg import Twist
 from sensor_msgs.msg import LaserScan
 from nav_msgs.msg import Odometry
 import math
+import time
 
 # ─── PARÁMETROS AJUSTABLES ────────────────────────────────────────────────────
-DIST_OBSTACULO_FRENTE = 0.40  # Distancia mínima al frente antes de girar
-DIST_PARED_DERECHA    = 0.35  # Distancia ideal a la pared derecha
-VEL_LINEAR            = 0.12  # Velocidad de avance
-VEL_GIRO_FUERTE       = 0.65  # Velocidad angular al girar por obstáculo
-KP                    = 2.0   # Ganancia proporcional (cuanto corrige al desviarse)
+DIST_OBSTACULO_FRENTE = 0.35   # Distancia mínima al frente antes de girar
+DIST_PARED_DERECHA    = 0.30   # Distancia ideal a la pared derecha
+VEL_LINEAR            = 0.12   # Velocidad de avance
+VEL_GIRO_FUERTE       = 0.65   # Velocidad angular al girar por obstáculo
+KP                    = 2.0    # Ganancia proporcional seguimiento de pared
+
+TIEMPO_GIRO_MINIMO    = 1.5    # Segundos mínimos girando antes de poder cambiar
+DIST_ESQUINA_CERRADA  = 0.20   # Si todo está a menos de esto → esquina cerrada
 # ──────────────────────────────────────────────────────────────────────────────
 
 class MazeSolver(Node):
@@ -25,13 +29,18 @@ class MazeSolver(Node):
         self.timer    = self.create_timer(0.1, self.control_loop)
 
         # Distancias por zona
-        self.d_front       = 3.0
-        self.d_front_right = 3.0  # zona diagonal delantera-derecha
-        self.d_right       = 3.0
-        self.d_left        = 3.0
+        self.d_front = 3.0
+        self.d_right = 3.0
+        self.d_left  = 3.0
+        self.d_back  = 3.0
 
-        # Estado de la maquina: 'avanzar' | 'girar_izq' | 'girar_der' | 'meta'
+        # Máquina de estados
+        # Estados: 'avanzar' | 'girar_izq' | 'girar_der' | 'escape' | 'meta'
         self.estado = 'avanzar'
+
+        # Temporizador de giro: evita cambiar de decisión antes de tiempo
+        self.tiempo_inicio_giro = 0.0
+        self.giro_comprometido  = False   # True mientras estamos en giro mínimo obligatorio
 
         # Meta
         self.META_X               = 2.75
@@ -44,7 +53,6 @@ class MazeSolver(Node):
         return 3.0 if (math.isinf(v) or math.isnan(v)) else float(v)
 
     def sector_min(self, ranges, a, b):
-        """Minimo limpio en el sector [a, b) del array ranges."""
         return min(self.clean(ranges[i]) for i in range(a, b))
 
     # ── Callbacks ─────────────────────────────────────────────────────────────
@@ -53,12 +61,11 @@ class MazeSolver(Node):
         if len(r) < 360:
             return
 
-        # Sectores mas estrechos -> decisiones mas precisas
-        self.d_front       = min(self.sector_min(r, 350, 360),
-                                 self.sector_min(r,   0,  10))  # +-10 al frente
-        self.d_front_right = self.sector_min(r, 310, 350)        # diagonal derecha
-        self.d_right       = self.sector_min(r, 260, 310)        # derecha
-        self.d_left        = self.sector_min(r,  50, 110)        # izquierda
+        self.d_front = min(self.sector_min(r, 350, 360),
+                           self.sector_min(r,   0,  10))   # ±10° al frente
+        self.d_right = self.sector_min(r, 260, 310)         # derecha
+        self.d_left  = self.sector_min(r,  50, 110)         # izquierda
+        self.d_back  = self.sector_min(r, 170, 190)         # detrás
 
     def odom_callback(self, msg):
         x = msg.pose.pose.position.x
@@ -66,45 +73,79 @@ class MazeSolver(Node):
         if math.sqrt((x - self.META_X)**2 + (y - self.META_Y)**2) < self.DISTANCIA_MINIMA_META:
             self.meta_alcanzada = True
 
-    # ── Logica principal ──────────────────────────────────────────────────────
+    # ── Lógica principal ──────────────────────────────────────────────────────
     def control_loop(self):
         twist = Twist()
 
-        # ── META ──────────────────────────────────────────────────────────────
         if self.meta_alcanzada:
             self.get_logger().info('META ALCANZADA! Robot detenido.')
             self.cmd_pub.publish(twist)
             return
 
-        d_f  = self.d_front
-        d_fr = self.d_front_right
-        d_r  = self.d_right
-        d_l  = self.d_left
+        d_f = self.d_front
+        d_r = self.d_right
+        d_l = self.d_left
+        d_b = self.d_back
+
+        ahora = time.time()
+        tiempo_girando = ahora - self.tiempo_inicio_giro
 
         self.get_logger().info(
-            f'F:{d_f:.2f}  FR:{d_fr:.2f}  R:{d_r:.2f}  L:{d_l:.2f}  [{self.estado}]'
+            f'F:{d_f:.2f} R:{d_r:.2f} L:{d_l:.2f} B:{d_b:.2f} [{self.estado}] '
+            f'giro:{tiempo_girando:.1f}s'
         )
 
-        # ── MAQUINA DE ESTADOS ────────────────────────────────────────────────
+        # ── DETECCIÓN DE ESQUINA CERRADA ──────────────────────────────────────
+        # Si frente, derecha e izquierda están todos bloqueados → escapar marcha atrás
+        if (d_f < DIST_ESQUINA_CERRADA and
+            d_r < DIST_ESQUINA_CERRADA + 0.05 and
+            d_l < DIST_ESQUINA_CERRADA + 0.05):
+            self.estado = 'escape'
+            self.giro_comprometido = False
 
-        if d_f < DIST_OBSTACULO_FRENTE:
-            # Obstaculo al frente: decidir hacia que lado girar
-            if d_l > d_r:
-                self.estado = 'girar_izq'   # mas espacio a la izquierda
-            else:
-                self.estado = 'girar_der'   # mas espacio a la derecha
+        # ── TRANSICIONES DE ESTADO ────────────────────────────────────────────
+        elif self.estado == 'avanzar':
+            if d_f < DIST_OBSTACULO_FRENTE:
+                # Elegir lado con más espacio y comprometerse
+                if d_l >= d_r:
+                    self.estado = 'girar_izq'
+                else:
+                    self.estado = 'girar_der'
+                self.tiempo_inicio_giro = ahora
+                self.giro_comprometido  = True
 
         elif self.estado in ('girar_izq', 'girar_der'):
-            # Seguimos girando hasta que el frente quede despejado (con histeresis)
-            if d_f >= DIST_OBSTACULO_FRENTE + 0.10:
-                self.estado = 'avanzar'
+            if self.giro_comprometido:
+                # Estamos en el tiempo mínimo obligatorio: no cambiar aunque el frente se despeje
+                if tiempo_girando >= TIEMPO_GIRO_MINIMO:
+                    self.giro_comprometido = False
 
-        else:
-            self.estado = 'avanzar'
+            else:
+                # Tiempo mínimo cumplido: podemos salir del giro si el frente está libre
+                if d_f >= DIST_OBSTACULO_FRENTE + 0.10:
+                    self.estado = 'avanzar'
+                # Si sigue bloqueado, volvemos a comprometernos con otro giro
+                elif d_f < DIST_OBSTACULO_FRENTE:
+                    if d_l >= d_r:
+                        self.estado = 'girar_izq'
+                    else:
+                        self.estado = 'girar_der'
+                    self.tiempo_inicio_giro = ahora
+                    self.giro_comprometido  = True
+
+        elif self.estado == 'escape':
+            # Salir del escape cuando haya espacio al frente o detrás
+            if d_f > DIST_OBSTACULO_FRENTE + 0.10 or d_b > 0.5:
+                self.estado = 'avanzar'
 
         # ── ACCIONES POR ESTADO ───────────────────────────────────────────────
 
-        if self.estado == 'girar_izq':
+        if self.estado == 'escape':
+            # Marcha atrás girando para salir de la esquina
+            twist.linear.x  = -0.08
+            twist.angular.z =  VEL_GIRO_FUERTE  # gira mientras retrocede
+
+        elif self.estado == 'girar_izq':
             twist.linear.x  = 0.0
             twist.angular.z = VEL_GIRO_FUERTE
 
@@ -121,8 +162,7 @@ class MazeSolver(Node):
             else:
                 # Control proporcional: mantener distancia ideal a la pared derecha
                 error = DIST_PARED_DERECHA - d_r
-                twist.angular.z = KP * error
-                twist.angular.z = max(min(twist.angular.z, 0.5), -0.5)
+                twist.angular.z = max(min(KP * error, 0.5), -0.5)
 
         self.cmd_pub.publish(twist)
 
