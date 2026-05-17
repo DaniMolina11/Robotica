@@ -9,20 +9,20 @@ import math
 import time
 from collections import deque
 
-# --- PARÁMETROS DE DISTANCIA PARA ARCO MUY ABIERTO ---
-DIST_GIRO_PASILLO      = 0.32   # Empezar mucho antes para tener espacio físico para el arco
-DIST_PARAR_GIRO        = 0.32
+# --- PARÁMETROS DE DISTANCIA ---
+DIST_GIRO_PASILLO      = 0.22   # Llegar más al fondo antes de girar
+DIST_PARAR_GIRO        = 0.22   # Retrasar el límite de parada
 DIST_FRENAR            = 0.55   
 DIST_PARED_DERECHA     = 0.25   
 DIST_PASILLO           = 0.45   
-DIST_ESQUINA_CERRADA   = 0.20   
+DIST_ESQUINA_CERRADA   = 0.20   # Mantenemos el límite crítico
 DIST_SEGURIDAD_TRASERA = 0.25   
 
 VEL_LINEAR_PASILLO    = 0.06
 VEL_LINEAR_NORMAL     = 0.08
 VEL_RETROCESO         = 0.05
-VEL_GIRO              = 0.28   # Más bajo = curva más suave y abierta
-VEL_AVANCE_GIRO       = 0.06   # Más alto = curva más larga y abierta
+VEL_GIRO              = 0.28   
+VEL_AVANCE_GIRO       = 0.06   
 KP                    = 1.2
 
 TIEMPO_GIRO_MINIMO    = 1.5
@@ -207,11 +207,22 @@ class MazeSolver(Node):
         tiempo_retro   = ahora - self.tiempo_inicio_retroceso
 
         en_pasillo      = (d_r < DIST_PASILLO and d_l < DIST_PASILLO)
+        
+        # NUEVO: Detección de callejón sin salida aislando diagonales muy cerradas
+        callejon_muerto = (en_pasillo and d_f < DIST_GIRO_PASILLO + 0.05 and 
+                           self.d_diag_izq < 0.35 and self.d_diag_der < 0.35)
+
         esquina_cerrada = (d_f < DIST_ESQUINA_CERRADA and
                            d_r < DIST_ESQUINA_CERRADA + 0.05 and
                            d_l < DIST_ESQUINA_CERRADA + 0.05)
 
-        if esquina_cerrada and self.estado not in ('girar_izq', 'girar_der', 'retroceder'):
+        if callejon_muerto and self.estado not in ('retroceder', 'escape'):
+            self._cambiar_estado('retroceder', 'callejon muerto detectado')
+            self.tiempo_inicio_retroceso = ahora
+            self.lado_giro_pendiente = 'izq' if self.d_left >= self.d_right else 'der'
+            self.giro_comprometido = False
+
+        elif esquina_cerrada and self.estado not in ('girar_izq', 'girar_der', 'retroceder'):
             self._cambiar_estado('escape', 'esquina cerrada')
             self.giro_comprometido = False
 
@@ -280,15 +291,14 @@ class MazeSolver(Node):
             evento = f'escape_recto B={self.d_back:.2f}'
             
         elif self.estado == 'girar_izq':
-            # Mantenemos el arco abierto hasta acercarnos peligrosamente (0.22m) al muro frontal
-            twist.linear.x  = VEL_AVANCE_GIRO if d_f > 0.22 else 0.0
+            twist.linear.x  = 0.0
             twist.angular.z = VEL_GIRO
-            evento = f'girar_izq arco={twist.linear.x>0} t={tiempo_girando:.1f}s'
+            evento = f'girar_izq t={tiempo_girando:.1f}s comp={self.giro_comprometido}'
             
         elif self.estado == 'girar_der':
-            twist.linear.x  = VEL_AVANCE_GIRO if d_f > 0.22 else 0.0
+            twist.linear.x  = 0.0
             twist.angular.z = -VEL_GIRO
-            evento = f'girar_der arco={twist.linear.x>0} t={tiempo_girando:.1f}s'
+            evento = f'girar_der t={tiempo_girando:.1f}s comp={self.giro_comprometido}'
             
         else:  # avanzar
             vel = self.velocidad_frenada(d_f, VEL_LINEAR_NORMAL)
