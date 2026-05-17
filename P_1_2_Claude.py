@@ -10,8 +10,8 @@ import time
 from collections import deque
 
 # --- PARÁMETROS DE DISTANCIA ---
-DIST_GIRO_PASILLO      = 0.25
-DIST_PARAR_GIRO        = 0.30
+DIST_GIRO_PASILLO      = 0.26   # Empezar un poco antes para dar espacio al arco ancho
+DIST_PARAR_GIRO        = 0.28
 DIST_FRENAR            = 0.55   
 DIST_PARED_DERECHA     = 0.25   
 DIST_PASILLO           = 0.45   
@@ -21,8 +21,8 @@ DIST_SEGURIDAD_TRASERA = 0.25
 VEL_LINEAR_PASILLO    = 0.06
 VEL_LINEAR_NORMAL     = 0.08
 VEL_RETROCESO         = 0.05
-VEL_GIRO              = 0.38
-VEL_AVANCE_GIRO       = 0.02
+VEL_GIRO              = 0.35   # Ligeramente menor para abrir más la curva
+VEL_AVANCE_GIRO       = 0.04   # El doble de rápido para que el arco sea amplio
 KP                    = 1.2
 
 TIEMPO_GIRO_MINIMO    = 1.5
@@ -211,7 +211,6 @@ class MazeSolver(Node):
                            d_r < DIST_ESQUINA_CERRADA + 0.05 and
                            d_l < DIST_ESQUINA_CERRADA + 0.05)
 
-        # 1. SOLUCIÓN: Proteger los giros activos para que esquina_cerrada no los interrumpa
         if esquina_cerrada and self.estado not in ('girar_izq', 'girar_der', 'retroceder'):
             self._cambiar_estado('escape', 'esquina cerrada')
             self.giro_comprometido = False
@@ -254,7 +253,6 @@ class MazeSolver(Node):
                     self._iniciar_giro(ahora)
 
         elif self.estado == 'escape':
-            # Salir de escape más rápido cuando haya espacio frontal
             if d_f > DIST_PARAR_GIRO:
                 self._cambiar_estado('avanzar', 'escape completado')
 
@@ -274,7 +272,6 @@ class MazeSolver(Node):
             evento = f'retrocediendo t={tiempo_retro:.1f}s B={self.d_back:.2f}'
             
         elif self.estado == 'escape':
-            # 2. SOLUCIÓN: Escape recto puro sin rotación para desatascarse
             if self.d_back > DIST_SEGURIDAD_TRASERA:
                 twist.linear.x = -VEL_RETROCESO
             else:
@@ -283,14 +280,14 @@ class MazeSolver(Node):
             evento = f'escape_recto B={self.d_back:.2f}'
             
         elif self.estado == 'girar_izq':
-            # 3. SOLUCIÓN: Arco inteligente (se convierte en rotación pura si está muy cerca de la pared frontal)
-            twist.linear.x  = VEL_AVANCE_GIRO if d_f > DIST_PARAR_GIRO else 0.0
+            # Permite mantener el arco hasta estar a 0.22m del frontal para no convertirlo en rotación estática
+            twist.linear.x  = VEL_AVANCE_GIRO if d_f > 0.22 else 0.0
             twist.angular.z = VEL_GIRO
             evento = f'girar_izq arco={twist.linear.x>0} t={tiempo_girando:.1f}s'
             
         elif self.estado == 'girar_der':
-            # 3. SOLUCIÓN: Arco inteligente
-            twist.linear.x  = VEL_AVANCE_GIRO if d_f > DIST_PARAR_GIRO else 0.0
+            # Permite mantener el arco hasta estar a 0.22m del frontal para no convertirlo en rotación estática
+            twist.linear.x  = VEL_AVANCE_GIRO if d_f > 0.22 else 0.0
             twist.angular.z = -VEL_GIRO
             evento = f'girar_der arco={twist.linear.x>0} t={tiempo_girando:.1f}s'
             
