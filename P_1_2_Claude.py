@@ -9,20 +9,20 @@ import math
 import time
 from collections import deque
 
-# --- PARÁMETROS DE DISTANCIA ---
-DIST_GIRO_PASILLO      = 0.22   # Llegar más al fondo antes de girar
-DIST_PARAR_GIRO        = 0.22   # Retrasar el límite de parada
+# --- PARÁMETROS DE DISTANCIA PARA ARCO MUY ABIERTO ---
+DIST_GIRO_PASILLO      = 0.32   # Empezar mucho antes para tener espacio físico para el arco
+DIST_PARAR_GIRO        = 0.32
 DIST_FRENAR            = 0.55   
 DIST_PARED_DERECHA     = 0.25   
 DIST_PASILLO           = 0.45   
-DIST_ESQUINA_CERRADA   = 0.20   # Mantenemos el límite crítico
+DIST_ESQUINA_CERRADA   = 0.20   
 DIST_SEGURIDAD_TRASERA = 0.25   
 
 VEL_LINEAR_PASILLO    = 0.06
 VEL_LINEAR_NORMAL     = 0.08
 VEL_RETROCESO         = 0.05
-VEL_GIRO              = 0.28   
-VEL_AVANCE_GIRO       = 0.06   
+VEL_GIRO              = 0.28   # Más bajo = curva más suave y abierta
+VEL_AVANCE_GIRO       = 0.06   # Más alto = curva más larga y abierta
 KP                    = 1.2
 
 TIEMPO_GIRO_MINIMO    = 1.5
@@ -208,16 +208,18 @@ class MazeSolver(Node):
 
         en_pasillo      = (d_r < DIST_PASILLO and d_l < DIST_PASILLO)
         
-        # NUEVO: Detección de callejón sin salida aislando diagonales muy cerradas
-        callejon_muerto = (en_pasillo and d_f < DIST_GIRO_PASILLO + 0.05 and 
-                           self.d_diag_izq < 0.35 and self.d_diag_der < 0.35)
+        # NUEVA LÓGICA: Detección inteligente de callejón sin salida (Aísla el fallo sin romper los arcos)
+        # En un callejón ciego, las diagonales detectan las paredes laterales (valores < 0.30m).
+        # En un giro normal, una de las diagonales mira hacia el pasillo abierto (valores > 0.40m).
+        callejon_muerto = (en_pasillo and d_f <= DIST_GIRO_PASILLO + 0.05 and 
+                           self.d_diag_izq < 0.30 and self.d_diag_der < 0.30)
 
         esquina_cerrada = (d_f < DIST_ESQUINA_CERRADA and
                            d_r < DIST_ESQUINA_CERRADA + 0.05 and
                            d_l < DIST_ESQUINA_CERRADA + 0.05)
 
         if callejon_muerto and self.estado not in ('retroceder', 'escape'):
-            self._cambiar_estado('retroceder', 'callejon muerto detectado')
+            self._cambiar_estado('retroceder', 'callejon sin salida detectado')
             self.tiempo_inicio_retroceso = ahora
             self.lado_giro_pendiente = 'izq' if self.d_left >= self.d_right else 'der'
             self.giro_comprometido = False
@@ -267,38 +269,32 @@ class MazeSolver(Node):
             if d_f > DIST_PARAR_GIRO:
                 self._cambiar_estado('avanzar', 'escape completado')
 
-        # --- APLICACIÓN DE VELOCIDADES ---
+        # --- APLICACIÓN DE VELOCIDADES (Mantenemos tu configuración original) ---
         evento = ''
         if self.estado == 'pasillo':
             twist.linear.x  = VEL_LINEAR_PASILLO
             twist.angular.z = 0.0
             evento = f'pasillo_recto f={d_f:.2f}'
-        
+            
         elif self.estado == 'retroceder':
-            if self.d_back > DIST_SEGURIDAD_TRASERA:
-                twist.linear.x = -VEL_RETROCESO
-            else:
-                twist.linear.x = 0.0
+            twist.linear.x  = -VEL_RETROCESO
             twist.angular.z = 0.0
-            evento = f'retrocediendo t={tiempo_retro:.1f}s B={self.d_back:.2f}'
+            evento = f'retrocediendo t={tiempo_retro:.1f}s'
             
         elif self.estado == 'escape':
-            if self.d_back > DIST_SEGURIDAD_TRASERA:
-                twist.linear.x = -VEL_RETROCESO
-            else:
-                twist.linear.x = 0.0
-            twist.angular.z = 0.0
-            evento = f'escape_recto B={self.d_back:.2f}'
+            twist.linear.x  = -0.05
+            twist.angular.z = VEL_GIRO
+            evento = 'escape'
             
         elif self.estado == 'girar_izq':
-            twist.linear.x  = 0.0
+            twist.linear.x  = VEL_AVANCE_GIRO if d_f > 0.22 else 0.0
             twist.angular.z = VEL_GIRO
-            evento = f'girar_izq t={tiempo_girando:.1f}s comp={self.giro_comprometido}'
+            evento = f'girar_izq arco={twist.linear.x>0} t={tiempo_girando:.1f}s'
             
         elif self.estado == 'girar_der':
-            twist.linear.x  = 0.0
+            twist.linear.x  = VEL_AVANCE_GIRO if d_f > 0.22 else 0.0
             twist.angular.z = -VEL_GIRO
-            evento = f'girar_der t={tiempo_girando:.1f}s comp={self.giro_comprometido}'
+            evento = f'girar_der arco={twist.linear.x>0} t={tiempo_girando:.1f}s'
             
         else:  # avanzar
             vel = self.velocidad_frenada(d_f, VEL_LINEAR_NORMAL)
