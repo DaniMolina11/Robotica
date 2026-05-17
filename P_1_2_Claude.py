@@ -207,8 +207,6 @@ class MazeSolver(Node):
         tiempo_retro   = ahora - self.tiempo_inicio_retroceso
 
         en_pasillo      = (d_r < DIST_PASILLO and d_l < DIST_PASILLO)
-        
-        # Restaurada tu lógica original de esquina cerrada
         esquina_cerrada = (d_f < DIST_ESQUINA_CERRADA and
                            d_r < DIST_ESQUINA_CERRADA + 0.05 and
                            d_l < DIST_ESQUINA_CERRADA + 0.05)
@@ -249,10 +247,10 @@ class MazeSolver(Node):
                 if tiempo_girando >= TIEMPO_GIRO_MINIMO:
                     self.giro_comprometido = False
             else:
+                # LA MAGIA ESTÁ AQUÍ: Solo salimos si el frente real está limpio.
+                # Ya no nos dejamos engañar por las paredes laterales durante un giro de 180º.
                 if d_f >= DIST_PARAR_GIRO + 0.10:
                     self._cambiar_estado('avanzar', f'frente libre d_f={d_f:.2f}')
-                elif d_f < DIST_PARAR_GIRO - 0.05:
-                    self._iniciar_giro(ahora)
 
         elif self.estado == 'escape':
             if d_f > DIST_PARAR_GIRO:
@@ -276,14 +274,12 @@ class MazeSolver(Node):
             evento = 'escape'
             
         elif self.estado == 'girar_izq':
-            # NUEVO SEGURO ANTICHOQUES: Solo hace el arco abierto si la diagonal izquierda NO está bloqueada por la pared (callejón sin salida)
             haciendo_arco = d_f > 0.22 and self.d_diag_izq > 0.25
             twist.linear.x  = VEL_AVANCE_GIRO if haciendo_arco else 0.0
             twist.angular.z = VEL_GIRO
             evento = f'girar_izq arco={haciendo_arco} t={tiempo_girando:.1f}s'
             
         elif self.estado == 'girar_der':
-            # NUEVO SEGURO ANTICHOQUES: Solo hace el arco abierto si la diagonal derecha NO está bloqueada
             haciendo_arco = d_f > 0.22 and self.d_diag_der > 0.25
             twist.linear.x  = VEL_AVANCE_GIRO if haciendo_arco else 0.0
             twist.angular.z = -VEL_GIRO
