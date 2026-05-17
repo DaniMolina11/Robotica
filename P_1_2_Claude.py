@@ -16,7 +16,7 @@ DIST_FRENAR            = 0.55
 DIST_PARED_DERECHA     = 0.25   
 DIST_PASILLO           = 0.45   
 DIST_ESQUINA_CERRADA   = 0.20   
-DIST_SEGURIDAD_TRASERA = 0.20   
+DIST_SEGURIDAD_TRASERA = 0.15   # Optimizado para apurar la trasera sin chocar
 
 VEL_LINEAR_PASILLO    = 0.06
 VEL_LINEAR_NORMAL     = 0.08
@@ -202,12 +202,10 @@ class MazeSolver(Node):
         tiempo_girando = ahora - self.tiempo_inicio_giro
         en_pasillo     = (d_r < DIST_PASILLO and d_l < DIST_PASILLO)
 
-        # --- REGLA ESTRICTA DE CALLEJÓN (Aplicando tu lógica literal) ---
-        # 1. Delante está cerca (<= 0.26)
-        # 2. Y OBLIGATORIAMENTE a los lados hay pared (< 0.30)
-        callejon_muerto = (d_f <= 0.26 and d_l < 0.30 and d_r < 0.30)
+        # --- REGLA CORREGIDA DE CALLEJÓN ---
+        # Subido el frente a 0.22 para reaccionar CON TIEMPO y MARGEN físico para no chocar
+        callejon_muerto = (d_f <= 0.22 and d_l < 0.30 and d_r < 0.30)
 
-        # Este if tiene prioridad absoluta para abortar cualquier giro fallido
         if callejon_muerto and self.estado not in ('retroceder', 'escape'):
             self._cambiar_estado('retroceder', 'callejon detectado (frente y laterales bloqueados)')
             self.giro_comprometido = False
@@ -231,8 +229,6 @@ class MazeSolver(Node):
                 self._iniciar_giro(ahora)
 
         elif self.estado == 'retroceder':
-            # RETIRADA HASTA LA INTERSECCIÓN: Va hacia atrás hasta que los láseres
-            # laterales ven el hueco de la entrada original.
             if self.d_left > 0.40 or self.d_right > 0.40:
                 lado = 'izq' if self.d_left > self.d_right else 'der'
                 self._cambiar_estado(f'girar_{lado}', f'salida trasera encontrada hacia {lado}')
@@ -253,7 +249,7 @@ class MazeSolver(Node):
             if d_f > DIST_PARAR_GIRO:
                 self._cambiar_estado('avanzar', 'escape completado')
 
-        # --- APLICACIÓN DE VELOCIDADES ORIGINALES ---
+        # --- APLICACIÓN DE VELOCIDADES ---
         evento = ''
         if self.estado == 'pasillo':
             twist.linear.x  = VEL_LINEAR_PASILLO
@@ -265,9 +261,9 @@ class MazeSolver(Node):
                 twist.linear.x = -VEL_RETROCESO
             else:
                 twist.linear.x = 0.0
-            # IMPORTANTE: Enderezarse mientras retrocede por si entró torcido al callejón
+            # INVERSIÓN CINEMÁTICA CORREGIDA: Signo negativo (-) añadido para corregir el rumbo yendo hacia atrás
             error_retroceso = self.d_left - self.d_right
-            twist.angular.z = max(min(KP * error_retroceso, 0.40), -0.40)
+            twist.angular.z = max(min(-KP * error_retroceso, 0.30), -0.30)
             evento = f'retrocediendo_centrado B={self.d_back:.2f} err={error_retroceso:.2f}'
             
         elif self.estado == 'escape':
@@ -285,7 +281,7 @@ class MazeSolver(Node):
             twist.angular.z = -VEL_GIRO
             evento = f'girar_der arco={twist.linear.x>0} t={tiempo_girando:.1f}s'
             
-        else:  # avanzar (Tu seguimiento original con KP)
+        else:  # avanzar
             vel = self.velocidad_frenada(d_f, VEL_LINEAR_NORMAL)
             twist.linear.x = vel
             if d_r > 1.2:
