@@ -9,25 +9,27 @@ import math
 import time
 from collections import deque
 
-# ─── PARÁMETROS AJUSTABLES ────────────────────────────────────────────────────
-DIST_PARAR_GIRO       = 0.28   # Frente < esto → parar (zona de peligro)
-DIST_FRENAR           = 0.55   # Frente < esto → empezar a frenar
+# ─── PARÁMETROS ───────────────────────────────────────────────────────────────
+# Distancias
+DIST_GIRO_PASILLO     = 0.26   # En pasillo: girar cuando frente < esto (sin frenada previa)
+DIST_PARAR_GIRO       = 0.28   # Fuera de pasillo: parar y girar
+DIST_FRENAR           = 0.55   # Fuera de pasillo: empezar a frenar
 DIST_PARED_DERECHA    = 0.25   # Distancia ideal a pared derecha
 DIST_PASILLO          = 0.45   # Der Y Izq < esto → pasillo
-DIST_ESQUINA_CERRADA  = 0.22   # Todo < esto → escape
+DIST_ESQUINA_CERRADA  = 0.22   # Todo bloqueado → escape
 
-# Para girar necesitamos espacio libre en el lado al que vamos a girar
-# El robot burger tiene ~0.18m de radio, necesitamos al menos 0.35m libres
-ESPACIO_MINIMO_GIRO   = 0.35
-
+# Velocidades
 VEL_LINEAR_PASILLO    = 0.06
 VEL_LINEAR_NORMAL     = 0.08
-VEL_RETROCESO         = 0.05   # Velocidad de retroceso antes de girar sin espacio
+VEL_RETROCESO         = 0.05
 VEL_GIRO              = 0.38
 KP                    = 1.2
 
-TIEMPO_GIRO_MINIMO    = 1.2
-TIEMPO_RETROCESO_MAX  = 1.5    # Máximo segundos retrocediendo para buscar espacio
+# Tiempos
+TIEMPO_GIRO_MINIMO    = 1.5
+TIEMPO_RETROCESO_MAX  = 2.0
+
+# LIDAR
 N_LECTURAS_PROMEDIO   = 5
 TICKS_CONFIRMACION    = 4
 
@@ -43,31 +45,34 @@ class MazeSolver(Node):
         self.odom_sub = self.create_subscription(Odometry,  '/odom', self.odom_callback, 10)
         self.timer    = self.create_timer(0.1, self.control_loop)
 
-        self.buf_front = deque(maxlen=N_LECTURAS_PROMEDIO)
-        self.buf_right = deque(maxlen=N_LECTURAS_PROMEDIO)
-        self.buf_left  = deque(maxlen=N_LECTURAS_PROMEDIO)
-        self.buf_back  = deque(maxlen=N_LECTURAS_PROMEDIO)
+        # Buffers LIDAR
+        self.buf_front      = deque(maxlen=N_LECTURAS_PROMEDIO)
+        self.buf_right      = deque(maxlen=N_LECTURAS_PROMEDIO)
+        self.buf_left       = deque(maxlen=N_LECTURAS_PROMEDIO)
+        self.buf_back       = deque(maxlen=N_LECTURAS_PROMEDIO)
+        self.buf_diag_izq   = deque(maxlen=N_LECTURAS_PROMEDIO)  # diagonal delantera izquierda
+        self.buf_diag_der   = deque(maxlen=N_LECTURAS_PROMEDIO)  # diagonal delantera derecha
 
-        self.d_front = 3.0
-        self.d_right = 3.0
-        self.d_left  = 3.0
-        self.d_back  = 3.0
+        self.d_front    = 3.0
+        self.d_right    = 3.0
+        self.d_left     = 3.0
+        self.d_back     = 3.0
+        self.d_diag_izq = 3.0  # ~45° izquierda
+        self.d_diag_der = 3.0  # ~45° derecha (315°)
 
         self.pos_x = 0.0
         self.pos_y = 0.0
-
         self.lecturas_acumuladas = 0
 
-        # Estados:
-        # 'esperando' | 'pasillo' | 'avanzar' | 'retroceder'
-        # | 'girar_izq' | 'girar_der' | 'escape' | 'meta'
+        # Estados: 'esperando'|'pasillo'|'avanzar'|'retroceder'|
+        #          'girar_izq'|'girar_der'|'escape'
         self.estado          = 'esperando'
         self.estado_anterior = 'esperando'
 
         self.tiempo_inicio_giro      = 0.0
         self.tiempo_inicio_retroceso = 0.0
         self.giro_comprometido       = False
-        self.lado_giro_pendiente     = None   # 'izq' o 'der', guardado durante retroceso
+        self.lado_giro_pendiente     = None
         self.ticks_fuera_pasillo     = 0
 
         self.META_X               = 2.75
@@ -75,51 +80,46 @@ class MazeSolver(Node):
         self.DISTANCIA_MINIMA_META = 0.25
         self.meta_alcanzada       = False
 
-        # Log
-        self.log_file = open(LOG_FILE, 'w')
-        self._escribir_log('=== INICIO SESION MAZE SOLVER ===')
-        self._escribir_log(
-            f'Parametros: DIST_PARAR={DIST_PARAR_GIRO} DIST_FRENAR={DIST_FRENAR} '
-            f'DIST_PASILLO={DIST_PASILLO} ESPACIO_GIRO={ESPACIO_MINIMO_GIRO} '
-            f'VEL_NORMAL={VEL_LINEAR_NORMAL} VEL_PASILLO={VEL_LINEAR_PASILLO} '
-            f'VEL_GIRO={VEL_GIRO} KP={KP} T_GIRO_MIN={TIEMPO_GIRO_MINIMO}'
-        )
-        self._escribir_log(
-            'TIEMPO_SIM | POS_X  | POS_Y  | ESTADO      | '
-            'F     | R     | L     | B     | VEL_LIN | VEL_ANG | EVENTO'
-        )
-        self._escribir_log('-' * 120)
-
-        self.tick_count  = 0
         self.sim_time    = 0.0
         self.vel_lin_pub = 0.0
         self.vel_ang_pub = 0.0
 
+        # Log
+        self.log_file = open(LOG_FILE, 'w')
+        self._log_raw('=== INICIO SESION MAZE SOLVER ===')
+        self._log_raw(
+            f'Params: DIST_GIRO_PASILLO={DIST_GIRO_PASILLO} DIST_PARAR={DIST_PARAR_GIRO} '
+            f'DIST_FRENAR={DIST_FRENAR} DIST_PASILLO={DIST_PASILLO} '
+            f'VEL_PASILLO={VEL_LINEAR_PASILLO} VEL_NORMAL={VEL_LINEAR_NORMAL} '
+            f'VEL_GIRO={VEL_GIRO} KP={KP} T_GIRO={TIEMPO_GIRO_MINIMO}'
+        )
+        self._log_raw(
+            'TSIM      | POS_X  | POS_Y  | ESTADO       | '
+            'F     | R     | L     | DI    | DD    | VL      | VA      | EVENTO'
+        )
+        self._log_raw('-' * 130)
+
     # ── Log ───────────────────────────────────────────────────────────────────
-    def _escribir_log(self, msg):
+    def _log_raw(self, msg):
         ts = time.strftime('%H:%M:%S')
-        linea = f'[{ts}] {msg}'
-        self.log_file.write(linea + '\n')
+        self.log_file.write(f'[{ts}] {msg}\n')
         self.log_file.flush()
 
     def _log_tick(self, evento=''):
-        linea = (
-            f'{self.sim_time:10.2f} | '
-            f'{self.pos_x:+6.3f} | {self.pos_y:+6.3f} | '
-            f'{self.estado:<12}| '
-            f'{self.d_front:5.2f} | {self.d_right:5.2f} | '
-            f'{self.d_left:5.2f} | {self.d_back:5.2f} | '
-            f'{self.vel_lin_pub:+7.3f} | {self.vel_ang_pub:+7.3f} | '
-            f'{evento}'
+        self._log_raw(
+            f'{self.sim_time:9.2f} | {self.pos_x:+6.3f} | {self.pos_y:+6.3f} | '
+            f'{self.estado:<13}| '
+            f'{self.d_front:5.2f} | {self.d_right:5.2f} | {self.d_left:5.2f} | '
+            f'{self.d_diag_izq:5.2f} | {self.d_diag_der:5.2f} | '
+            f'{self.vel_lin_pub:+7.3f} | {self.vel_ang_pub:+7.3f} | {evento}'
         )
-        self._escribir_log(linea)
 
-    def _log_evento(self, evento):
-        """Log de eventos importantes (cambios de estado, decisiones clave)."""
-        self._escribir_log(
-            f'*** EVENTO: {evento} | estado={self.estado} '
+    def _log_evento(self, msg):
+        self._log_raw(
+            f'*** {msg} | estado={self.estado} '
             f'pos=({self.pos_x:.3f},{self.pos_y:.3f}) '
-            f'F={self.d_front:.2f} R={self.d_right:.2f} L={self.d_left:.2f}'
+            f'F={self.d_front:.2f} R={self.d_right:.2f} L={self.d_left:.2f} '
+            f'DI={self.d_diag_izq:.2f} DD={self.d_diag_der:.2f}'
         )
 
     # ── Utilidad ──────────────────────────────────────────────────────────────
@@ -133,6 +133,7 @@ class MazeSolver(Node):
         return sum(buf) / len(buf) if buf else 3.0
 
     def velocidad_frenada(self, d_front, vel_max):
+        """Solo para modo avanzar (fuera de pasillo)."""
         if d_front >= DIST_FRENAR:
             return vel_max
         if d_front <= DIST_PARAR_GIRO:
@@ -145,67 +146,76 @@ class MazeSolver(Node):
         r = msg.ranges
         if len(r) < 360:
             return
+
         self.buf_front.append(min(self.sector_min(r, 350, 360),
                                   self.sector_min(r,   0,  10)))
-        self.buf_right.append(self.sector_min(r, 260, 310))
-        self.buf_left.append( self.sector_min(r,  50, 110))
-        self.buf_back.append( self.sector_min(r, 170, 190))
+        self.buf_right.append(   self.sector_min(r, 260, 310))
+        self.buf_left.append(    self.sector_min(r,  50, 110))
+        self.buf_back.append(    self.sector_min(r, 170, 190))
+        self.buf_diag_izq.append(self.sector_min(r,  30,  60))   # 30-60° → diagonal izq
+        self.buf_diag_der.append(self.sector_min(r, 300, 330))   # 300-330° → diagonal der
+
         self.lecturas_acumuladas += 1
-        self.d_front = self.promedio(self.buf_front)
-        self.d_right = self.promedio(self.buf_right)
-        self.d_left  = self.promedio(self.buf_left)
-        self.d_back  = self.promedio(self.buf_back)
-        self.sim_time = msg.header.stamp.sec + msg.header.stamp.nanosec * 1e-9
+        self.d_front    = self.promedio(self.buf_front)
+        self.d_right    = self.promedio(self.buf_right)
+        self.d_left     = self.promedio(self.buf_left)
+        self.d_back     = self.promedio(self.buf_back)
+        self.d_diag_izq = self.promedio(self.buf_diag_izq)
+        self.d_diag_der = self.promedio(self.buf_diag_der)
+        self.sim_time   = msg.header.stamp.sec + msg.header.stamp.nanosec * 1e-9
 
     def odom_callback(self, msg):
         self.pos_x = msg.pose.pose.position.x
         self.pos_y = msg.pose.pose.position.y
         dist = math.sqrt((self.pos_x - self.META_X)**2 + (self.pos_y - self.META_Y)**2)
-        if dist < self.DISTANCIA_MINIMA_META:
-            if not self.meta_alcanzada:
-                self._log_evento(f'META ALCANZADA a distancia={dist:.3f}')
+        if dist < self.DISTANCIA_MINIMA_META and not self.meta_alcanzada:
             self.meta_alcanzada = True
+            self._log_evento(f'META ALCANZADA dist={dist:.3f}')
 
-    # ── Lógica principal ──────────────────────────────────────────────────────
+    # ── Cambio de estado con log ───────────────────────────────────────────────
     def _cambiar_estado(self, nuevo, motivo=''):
         if nuevo != self.estado:
-            self._log_evento(f'{self.estado} -> {nuevo}  motivo: {motivo}')
+            self._log_evento(f'ESTADO {self.estado} -> {nuevo}  [{motivo}]')
             self.estado_anterior = self.estado
             self.estado = nuevo
 
-    def _iniciar_retroceso(self, lado_pendiente):
-        """Retroceder para ganar espacio antes de girar."""
-        self.lado_giro_pendiente     = lado_pendiente
-        self.tiempo_inicio_retroceso = time.time()
-        self._cambiar_estado('retroceder',
-                             f'sin espacio para girar_{lado_pendiente} '
-                             f'(L={self.d_left:.2f} R={self.d_right:.2f})')
-
-    def _iniciar_giro(self, d_l, d_r, ahora):
+    # ── Inicio de giro ────────────────────────────────────────────────────────
+    def _decidir_lado_giro(self):
         """
-        Decide el lado del giro. Si no hay espacio suficiente en ese lado,
-        retrocede primero para crear distancia.
+        En pasillo usamos las diagonales delanteras para ver qué lado tiene
+        más espacio al doblar la esquina, no los laterales puros que siempre
+        están bloqueados por las paredes del pasillo.
         """
-        lado = 'izq' if d_l >= d_r else 'der'
-        espacio = d_l if lado == 'izq' else d_r
+        en_pasillo = (self.d_right < DIST_PASILLO and self.d_left < DIST_PASILLO)
 
-        if espacio < ESPACIO_MINIMO_GIRO:
-            # No hay espacio: retroceder para crearlo
-            self._iniciar_retroceso(lado)
-        else:
-            # Hay espacio: girar directamente
-            self.estado = f'girar_{lado}'
-            self.tiempo_inicio_giro = ahora
-            self.giro_comprometido  = True
+        if en_pasillo:
+            # Usamos diagonal: más espacio diagonal → girar hacia ese lado
+            lado = 'izq' if self.d_diag_izq >= self.d_diag_der else 'der'
+            espacio = self.d_diag_izq if lado == 'izq' else self.d_diag_der
             self._log_evento(
-                f'Giro {lado} directo, espacio={espacio:.2f}m')
+                f'Decisión giro en PASILLO por diagonal: lado={lado} '
+                f'DI={self.d_diag_izq:.2f} DD={self.d_diag_der:.2f}'
+            )
+        else:
+            lado = 'izq' if self.d_left >= self.d_right else 'der'
+            espacio = self.d_left if lado == 'izq' else self.d_right
+            self._log_evento(
+                f'Decisión giro NORMAL: lado={lado} espacio={espacio:.2f}'
+            )
+        return lado
 
+    def _iniciar_giro(self, ahora):
+        lado = self._decidir_lado_giro()
+        self._cambiar_estado(f'girar_{lado}', f'giro directo lado={lado}')
+        self.tiempo_inicio_giro = ahora
+        self.giro_comprometido  = True
+
+    # ── Control principal ─────────────────────────────────────────────────────
     def control_loop(self):
         twist = Twist()
-        self.tick_count += 1
 
         if self.meta_alcanzada:
-            self._log_tick('META - robot detenido')
+            self._log_tick('META - detenido')
             self.cmd_pub.publish(twist)
             return
 
@@ -217,9 +227,11 @@ class MazeSolver(Node):
         if self.estado == 'esperando':
             self._cambiar_estado('avanzar', 'lecturas listas')
 
-        d_f = self.d_front
-        d_r = self.d_right
-        d_l = self.d_left
+        d_f  = self.d_front
+        d_r  = self.d_right
+        d_l  = self.d_left
+        d_di = self.d_diag_izq
+        d_dd = self.d_diag_der
 
         ahora          = time.time()
         tiempo_girando = ahora - self.tiempo_inicio_giro
@@ -239,35 +251,30 @@ class MazeSolver(Node):
         elif self.estado == 'pasillo':
             if en_pasillo:
                 self.ticks_fuera_pasillo = 0
-                if d_f < DIST_PARAR_GIRO:
-                    self._iniciar_giro(d_l, d_r, ahora)
+                # En pasillo NO frenamos: avanzamos hasta DIST_GIRO_PASILLO y giramos
+                if d_f < DIST_GIRO_PASILLO:
+                    self._iniciar_giro(ahora)
             else:
                 self.ticks_fuera_pasillo += 1
                 if self.ticks_fuera_pasillo >= TICKS_CONFIRMACION:
-                    self._cambiar_estado('avanzar', 'salida de pasillo confirmada')
+                    self._cambiar_estado('avanzar', 'salida pasillo confirmada')
                     self.ticks_fuera_pasillo = 0
 
         elif self.estado == 'avanzar':
-            if en_pasillo and d_f >= DIST_PARAR_GIRO:
+            if en_pasillo and d_f >= DIST_GIRO_PASILLO:
                 self._cambiar_estado('pasillo', 'pasillo detectado')
                 self.ticks_fuera_pasillo = 0
             elif d_f < DIST_PARAR_GIRO:
-                self._iniciar_giro(d_l, d_r, ahora)
+                self._iniciar_giro(ahora)
 
         elif self.estado == 'retroceder':
-            # Retrocedemos hasta que haya espacio suficiente en el lado pendiente
-            espacio_actual = d_l if self.lado_giro_pendiente == 'izq' else d_r
-            if espacio_actual >= ESPACIO_MINIMO_GIRO:
-                self._log_evento(
-                    f'Espacio conseguido tras retroceso: {espacio_actual:.2f}m')
-                self.estado = f'girar_{self.lado_giro_pendiente}'
-                self.tiempo_inicio_giro = ahora
-                self.giro_comprometido  = True
-            elif tiempo_retro >= TIEMPO_RETROCESO_MAX:
-                # Tiempo máximo agotado: intentar girar igualmente
-                self._log_evento(
-                    f'Retroceso timeout ({tiempo_retro:.1f}s), forzando giro')
-                self.estado = f'girar_{self.lado_giro_pendiente}'
+            # Retrocedemos hasta que las diagonales indiquen espacio suficiente
+            espacio_diag = d_di if self.lado_giro_pendiente == 'izq' else d_dd
+            if espacio_diag >= 0.40 or tiempo_retro >= TIEMPO_RETROCESO_MAX:
+                motivo = 'espacio conseguido' if espacio_diag >= 0.40 else 'timeout retroceso'
+                self._log_evento(f'Fin retroceso: {motivo} diag={espacio_diag:.2f}')
+                lado = self.lado_giro_pendiente
+                self._cambiar_estado(f'girar_{lado}', motivo)
                 self.tiempo_inicio_giro = ahora
                 self.giro_comprometido  = True
 
@@ -277,68 +284,64 @@ class MazeSolver(Node):
                     self.giro_comprometido = False
             else:
                 if d_f >= DIST_PARAR_GIRO + 0.10:
-                    self._cambiar_estado('avanzar', f'frente despejado tras giro ({d_f:.2f}m)')
+                    self._cambiar_estado('avanzar', f'frente libre tras giro d_f={d_f:.2f}')
                 elif d_f < DIST_PARAR_GIRO:
-                    self._iniciar_giro(d_l, d_r, ahora)
+                    self._iniciar_giro(ahora)
 
         elif self.estado == 'escape':
             if d_f > DIST_PARAR_GIRO + 0.15:
                 self._cambiar_estado('avanzar', 'escape completado')
 
         # ── ACCIONES ──────────────────────────────────────────────────────────
-        evento_tick = ''
+        evento = ''
 
         if self.estado == 'pasillo':
-            vel = self.velocidad_frenada(d_f, VEL_LINEAR_PASILLO)
-            twist.linear.x  = vel
+            # Sin frenada: ir a velocidad constante hasta DIST_GIRO_PASILLO
+            twist.linear.x  = VEL_LINEAR_PASILLO
             twist.angular.z = 0.0
-            if vel < VEL_LINEAR_PASILLO:
-                evento_tick = f'frenando_pasillo vel={vel:.3f}'
+            evento = f'pasillo_recto f={d_f:.2f}'
 
         elif self.estado == 'retroceder':
             twist.linear.x  = -VEL_RETROCESO
             twist.angular.z = 0.0
-            evento_tick = f'retrocediendo t={tiempo_retro:.1f}s lado={self.lado_giro_pendiente}'
+            evento = f'retrocediendo t={tiempo_retro:.1f}s lado={self.lado_giro_pendiente}'
 
         elif self.estado == 'escape':
             twist.linear.x  = -0.05
             twist.angular.z =  VEL_GIRO
-            evento_tick = 'escape activo'
+            evento = 'escape'
 
         elif self.estado == 'girar_izq':
             twist.linear.x  = 0.0
             twist.angular.z = VEL_GIRO
-            evento_tick = f'girando_izq t={tiempo_girando:.1f}s comprometido={self.giro_comprometido}'
+            evento = f'girar_izq t={tiempo_girando:.1f}s comp={self.giro_comprometido}'
 
         elif self.estado == 'girar_der':
             twist.linear.x  = 0.0
             twist.angular.z = -VEL_GIRO
-            evento_tick = f'girando_der t={tiempo_girando:.1f}s comprometido={self.giro_comprometido}'
+            evento = f'girar_der t={tiempo_girando:.1f}s comp={self.giro_comprometido}'
 
         else:  # avanzar
             vel = self.velocidad_frenada(d_f, VEL_LINEAR_NORMAL)
             twist.linear.x = vel
             if d_r > 1.2:
                 twist.angular.z = -0.20
-                evento_tick = 'buscando_pared_der'
+                evento = f'buscando_pared vel={vel:.3f}'
             else:
                 error = DIST_PARED_DERECHA - d_r
                 twist.angular.z = max(min(KP * error, 0.40), -0.40)
-                evento_tick = f'siguiendo_pared err={error:.3f}'
+                evento = f'siguiendo_pared err={error:.3f} vel={vel:.3f}'
             if vel < VEL_LINEAR_NORMAL:
-                evento_tick += f' frenando vel={vel:.3f}'
+                evento += f' FRENANDO'
 
         self.vel_lin_pub = twist.linear.x
         self.vel_ang_pub = twist.angular.z
-
-        # Log cada tick (cada 0.1s) y siempre en eventos importantes
-        self._log_tick(evento_tick)
-
+        self._log_tick(evento)
         self.cmd_pub.publish(twist)
 
     def __del__(self):
         try:
-            self._escribir_log('=== FIN SESION ===')
+            self._log_raw('=== FIN SESION ===')
             self.log_file.close()
         except Exception:
             pass
@@ -352,7 +355,7 @@ def main(args=None):
     except KeyboardInterrupt:
         pass
     finally:
-        nodo._escribir_log('=== INTERRUPCION USUARIO ===')
+        nodo._log_raw('=== INTERRUPCION USUARIO ===')
         nodo.cmd_pub.publish(Twist())
         nodo.log_file.close()
         nodo.destroy_node()
