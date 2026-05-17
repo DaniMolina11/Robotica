@@ -9,9 +9,9 @@ import math
 import time
 from collections import deque
 
-# --- PARÁMETROS DE DISTANCIA AJUSTADOS PARA GIRO EN ARCO ---
-DIST_GIRO_PASILLO      = 0.25   # Aumentado para dar espacio al arco
-DIST_PARAR_GIRO        = 0.30   # Aumentado para no chocar de frente al avanzar girando
+# --- PARÁMETROS DE DISTANCIA ---
+DIST_GIRO_PASILLO      = 0.25
+DIST_PARAR_GIRO        = 0.30
 DIST_FRENAR            = 0.55   
 DIST_PARED_DERECHA     = 0.25   
 DIST_PASILLO           = 0.45   
@@ -22,7 +22,7 @@ VEL_LINEAR_PASILLO    = 0.06
 VEL_LINEAR_NORMAL     = 0.08
 VEL_RETROCESO         = 0.05
 VEL_GIRO              = 0.38
-VEL_AVANCE_GIRO       = 0.02   # NUEVO: Avance constante durante el giro de esquinas
+VEL_AVANCE_GIRO       = 0.02
 KP                    = 1.2
 
 TIEMPO_GIRO_MINIMO    = 1.5
@@ -211,7 +211,8 @@ class MazeSolver(Node):
                            d_r < DIST_ESQUINA_CERRADA + 0.05 and
                            d_l < DIST_ESQUINA_CERRADA + 0.05)
 
-        if esquina_cerrada:
+        # 1. SOLUCIÓN: Proteger los giros activos para que esquina_cerrada no los interrumpa
+        if esquina_cerrada and self.estado not in ('girar_izq', 'girar_der', 'retroceder'):
             self._cambiar_estado('escape', 'esquina cerrada')
             self.giro_comprometido = False
 
@@ -247,14 +248,14 @@ class MazeSolver(Node):
                 if tiempo_girando >= TIEMPO_GIRO_MINIMO:
                     self.giro_comprometido = False
             else:
-                # Modificado: Se añade +0.10 a DIST_PARAR_GIRO porque el arco nos ha acercado un poco
                 if d_f >= DIST_PARAR_GIRO + 0.10:
                     self._cambiar_estado('avanzar', f'frente libre d_f={d_f:.2f}')
-                elif d_f < DIST_PARAR_GIRO - 0.05: # Margen de seguridad por si el arco apura demasiado
+                elif d_f < DIST_PARAR_GIRO - 0.05:
                     self._iniciar_giro(ahora)
 
         elif self.estado == 'escape':
-            if d_f > DIST_PARAR_GIRO + 0.15:
+            # Salir de escape más rápido cuando haya espacio frontal
+            if d_f > DIST_PARAR_GIRO:
                 self._cambiar_estado('avanzar', 'escape completado')
 
         # --- APLICACIÓN DE VELOCIDADES ---
@@ -273,24 +274,25 @@ class MazeSolver(Node):
             evento = f'retrocediendo t={tiempo_retro:.1f}s B={self.d_back:.2f}'
             
         elif self.estado == 'escape':
+            # 2. SOLUCIÓN: Escape recto puro sin rotación para desatascarse
             if self.d_back > DIST_SEGURIDAD_TRASERA:
-                twist.linear.x = -0.05
+                twist.linear.x = -VEL_RETROCESO
             else:
                 twist.linear.x = 0.0
-            twist.angular.z = VEL_GIRO
-            evento = f'escape B={self.d_back:.2f}'
+            twist.angular.z = 0.0
+            evento = f'escape_recto B={self.d_back:.2f}'
             
         elif self.estado == 'girar_izq':
-            # NUEVO: VEL_AVANCE_GIRO para hacer un arco y no engancharse
-            twist.linear.x  = VEL_AVANCE_GIRO
+            # 3. SOLUCIÓN: Arco inteligente (se convierte en rotación pura si está muy cerca de la pared frontal)
+            twist.linear.x  = VEL_AVANCE_GIRO if d_f > DIST_PARAR_GIRO else 0.0
             twist.angular.z = VEL_GIRO
-            evento = f'girar_izq arco t={tiempo_girando:.1f}s comp={self.giro_comprometido}'
+            evento = f'girar_izq arco={twist.linear.x>0} t={tiempo_girando:.1f}s'
             
         elif self.estado == 'girar_der':
-            # NUEVO: VEL_AVANCE_GIRO para hacer un arco y no engancharse
-            twist.linear.x  = VEL_AVANCE_GIRO
+            # 3. SOLUCIÓN: Arco inteligente
+            twist.linear.x  = VEL_AVANCE_GIRO if d_f > DIST_PARAR_GIRO else 0.0
             twist.angular.z = -VEL_GIRO
-            evento = f'girar_der arco t={tiempo_girando:.1f}s comp={self.giro_comprometido}'
+            evento = f'girar_der arco={twist.linear.x>0} t={tiempo_girando:.1f}s'
             
         else:  # avanzar
             vel = self.velocidad_frenada(d_f, VEL_LINEAR_NORMAL)
