@@ -11,7 +11,7 @@ from collections import deque
 
 # ─── PARÁMETROS ───────────────────────────────────────────────────────────────
 # Distancias
-DIST_GIRO_PASILLO     = 0.26   # En pasillo: girar cuando frente < esto (sin frenada previa)
+DIST_GIRO_PASILLO     = 0.20   # En pasillo: girar cuando frente < esto (sin frenada previa)
 DIST_PARAR_GIRO       = 0.28   # Fuera de pasillo: parar y girar
 DIST_FRENAR           = 0.55   # Fuera de pasillo: empezar a frenar
 DIST_PARED_DERECHA    = 0.25   # Distancia ideal a pared derecha
