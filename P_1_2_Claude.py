@@ -13,7 +13,6 @@ from collections import deque
 DIST_GIRO_PASILLO      = 0.32   
 DIST_PARAR_GIRO        = 0.32
 DIST_FRENAR            = 0.55   
-DIST_PARED_DERECHA     = 0.15   
 DIST_PASILLO           = 0.45   
 DIST_ESQUINA_CERRADA   = 0.20   
 DIST_SEGURIDAD_TRASERA = 0.25   
@@ -23,9 +22,7 @@ VEL_LINEAR_NORMAL     = 0.08
 VEL_RETROCESO         = 0.05
 VEL_GIRO              = 0.28   
 VEL_AVANCE_GIRO       = 0.06   
-KP                    = 1.2
-KP_CENTRAR            = 0.8    # Suavizado para evitar latigazos
-MAX_VEL_ANG_PASILLO   = 0.15   # Límite estricto de giro angular dentro de pasillos
+KP_CENTRAR            = 1.5    # Fuerza de corrección para mantener el centro perfecto
 
 TIEMPO_GIRO_MINIMO    = 1.5
 N_LECTURAS_PROMEDIO   = 5
@@ -80,7 +77,7 @@ class MazeSolver(Node):
         self._log_raw('=== INICIO SESION MAZE SOLVER ===')
         self._log_raw(
             f'Params: DIST_GIRO={DIST_GIRO_PASILLO} DIST_PARAR={DIST_PARAR_GIRO} '
-            f'VEL_NORMAL={VEL_LINEAR_NORMAL} VEL_GIRO={VEL_GIRO} KP={KP} KP_CENTRAR={KP_CENTRAR}'
+            f'VEL_NORMAL={VEL_LINEAR_NORMAL} VEL_GIRO={VEL_GIRO} KP_CENTRAR={KP_CENTRAR}'
         )
         self._log_raw(
             'TSIM      | POS_X  | POS_Y  | ESTADO       | '
@@ -205,7 +202,6 @@ class MazeSolver(Node):
 
         en_pasillo      = (d_r < DIST_PASILLO and d_l < DIST_PASILLO)
         
-        # Corrección: El frente debe estar mucho más cerca (< 0.25) para confirmar callejón real
         callejon_muerto = (en_pasillo and d_f < 0.25 and 
                            self.d_diag_izq < 0.28 and self.d_diag_der < 0.28)
         esquina_cerrada = (d_f < DIST_ESQUINA_CERRADA and
@@ -249,18 +245,26 @@ class MazeSolver(Node):
                 if d_f >= DIST_PARAR_GIRO + 0.10:
                     self._cambiar_estado('avanzar', f'frente libre d_f={d_f:.2f}')
 
+        # --- SISTEMA DE CENTRADO ABSOLUTO CON LIDAR ---
+        # Topamos la visión a 0.35m (un poco más de la mitad del pasillo real).
+        # Si un lado está vacío (ej. intersección), el robot "ve" una pared imaginaria a 0.35m.
+        # Esto hace que se aleje de la pared real sin dar volantazos exagerados.
+        LIMITE_VISION = 0.35
+        d_l_efectiva = min(d_l, LIMITE_VISION)
+        d_r_efectiva = min(d_r, LIMITE_VISION)
+        
+        # Error positivo (d_l > d_r) -> pegado a la derecha -> debe girar a la izquierda (+)
+        # Error negativo (d_l < d_r) -> pegado a la izquierda -> debe girar a la derecha (-)
+        error_centrado = d_l_efectiva - d_r_efectiva
+        correccion_angular = max(min(KP_CENTRAR * error_centrado, 0.40), -0.40)
+
         # --- APLICACIÓN DE VELOCIDADES ---
         evento = ''
         
         if self.estado == 'pasillo':
             twist.linear.x  = VEL_LINEAR_PASILLO
-            # Centrado dinámico suave y limitado
-            if d_r < DIST_PASILLO and d_l < DIST_PASILLO:
-                error = d_l - d_r
-                twist.angular.z = max(min(KP_CENTRAR * error, MAX_VEL_ANG_PASILLO), -MAX_VEL_ANG_PASILLO)
-            else:
-                twist.angular.z = 0.0
-            evento = f'pasillo_recto f={d_f:.2f}'
+            twist.angular.z = correccion_angular
+            evento = f'pasillo_recto err={error_centrado:.3f}'
             
         elif self.estado == 'retroceder':
             if self.d_back > DIST_SEGURIDAD_TRASERA:
@@ -285,21 +289,8 @@ class MazeSolver(Node):
         else:  # avanzar
             vel = self.velocidad_frenada(d_f, VEL_LINEAR_NORMAL)
             twist.linear.x = vel
-            
-            if d_r < DIST_PASILLO and d_l < DIST_PASILLO:
-                # Centrado dinámico suave y limitado
-                error = d_l - d_r
-                twist.angular.z = max(min(KP_CENTRAR * error, MAX_VEL_ANG_PASILLO), -MAX_VEL_ANG_PASILLO)
-                evento = f'centrando_dinamico err={error:.3f} vel={vel:.3f}'
-            elif d_r < 1.2:
-                # Solo ve pared derecha
-                error = DIST_PARED_DERECHA - d_r
-                twist.angular.z = max(min(KP * error, 0.40), -0.40)
-                evento = f'siguiendo_pared_der err={error:.3f} vel={vel:.3f}'
-            else:
-                # Pérdida total de paredes
-                twist.angular.z = -0.20
-                evento = f'buscando_pared vel={vel:.3f}'
+            twist.angular.z = correccion_angular
+            evento = f'avanzando_centrado err={error_centrado:.3f} vel={vel:.3f}'
                 
             if vel < VEL_LINEAR_NORMAL:
                 evento += ' FRENANDO'
