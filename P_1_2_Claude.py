@@ -15,9 +15,8 @@ DIST_PARAR_GIRO        = 0.32
 DIST_FRENAR            = 0.55   
 DIST_PARED_DERECHA     = 0.25   
 DIST_PASILLO           = 0.45   
-
-# Eliminado el parametro DIST_ESQUINA_CERRADA porque ya no hay marcha atras en curvas
-DIST_SEGURIDAD_TRASERA = 0.12   
+DIST_ESQUINA_CERRADA   = 0.20   
+DIST_SEGURIDAD_TRASERA = 0.15   
 
 VEL_LINEAR_PASILLO    = 0.06
 VEL_LINEAR_NORMAL     = 0.08
@@ -209,10 +208,10 @@ class MazeSolver(Node):
         d_l = self.d_left
 
         ahora          = time.time()
-        tiempo_girando = ahora - self.tiempo_inicio_giro
+        tiempo_generado_en_giro = ahora - self.tiempo_inicio_giro
         en_pasillo     = (d_r < DIST_PASILLO and d_l < DIST_PASILLO)
 
-        # --- MÁQUINA DE ESTADOS 100% ORIGINAL ---
+        # --- MÁQUINA DE ESTADOS ORIGINAL DE TU CÓDIGO ---
         if self.estado == 'pasillo':
             if en_pasillo:
                 self.ticks_fuera_pasillo = 0
@@ -231,21 +230,28 @@ class MazeSolver(Node):
             elif d_f < DIST_PARAR_GIRO:
                 self._iniciar_giro(ahora)
 
+        # --- NUEVA LOGICA MARCHA ATRÁS EXCLUSIVA PARA EL CALLEJÓN ---
+        elif self.estado == 'retroceder':
+            # Retrocede recto hasta encontrar el espacio abierto en los lados (>0.35m) 
+            # o hasta rozar la pared trasera por seguridad (<0.16m)
+            if self.d_left > 0.35 or self.d_right > 0.35 or self.d_back <= DIST_SEGURIDAD_TRASERA + 0.01:
+                self._iniciar_giro(ahora)
+
         elif self.estado in ('girar_izq', 'girar_der'):
             if self.giro_comprometido:
-                if tiempo_girando >= TIEMPO_GIRO_MINIMO:
+                if tiempo_generado_en_giro >= TIEMPO_GIRO_MINIMO:
                     self.giro_comprometido = False
             else:
                 if d_f >= DIST_PARAR_GIRO + 0.10:
                     self._cambiar_estado('avanzar', f'frente libre d_f={d_f:.2f}')
                 elif d_f < DIST_PARAR_GIRO - 0.05:
-                    # EL GRAN PARCHE ANTI-BUCLE: Si el frente sigue totalmente tapado,
-                    # significa que estamos en un callejón sin salida (U-Turn).
-                    # Bloqueamos el cambio de sentido manteniendo el estado actual (pass)
-                    # para evitar que oscile de izquierda a derecha sin parar.
+                    # DETECTOR DE CALLEJÓN INTEGRADO: Ha pasado el tiempo mínimo y el frente sigue tapado.
+                    # Si los sensores izquierdo y derecho confirman que estamos empotrados en un pasillo estrecho:
                     if self.d_left < 0.30 and self.d_right < 0.30:
-                        pass 
+                        self._cambiar_estado('retroceder', 'Callejon sin espacio fisico para rotar. Marcha atras.')
+                        self.reset_filtros()
                     else:
+                        # Si hay espacio a los lados, es una curva normal: recalculamos con tu lógica original
                         self._iniciar_giro(ahora)
 
         elif self.estado == 'escape':
@@ -259,22 +265,31 @@ class MazeSolver(Node):
             twist.angular.z = 0.0
             evento = f'pasillo_recto f={d_f:.2f}'
             
+        elif self.estado == 'retroceder':
+            if self.d_back > DIST_SEGURIDAD_TRASERA:
+                twist.linear.x = -VEL_RETROCESO
+            else:
+                twist.linear.x = 0.0
+            # Fuerza un retroceso recto impecable sin bailar de lado a lado
+            twist.angular.z = 0.0  
+            evento = f'retrocediendo_recto B={self.d_back:.2f}'
+            
         elif self.estado == 'escape':
             twist.linear.x  = -0.05
             twist.angular.z = VEL_GIRO
             evento = 'escape'
             
         elif self.estado == 'girar_izq':
-            # Si el frente está súper pegado a la pared del fondo del callejón, 
-            # bajamos el avance lineal a 0.0 para que pivote sobre su eje y no rasque el morro
+            # Tu arco de curva perfecto
             twist.linear.x  = VEL_AVANCE_GIRO if d_f > 0.22 else 0.0
             twist.angular.z = VEL_GIRO
-            evento = f'girar_izq arco={twist.linear.x>0} t={tiempo_girando:.1f}s'
+            evento = f'girar_izq arco={twist.linear.x>0} t={tiempo_generado_en_giro:.1f}s'
             
         elif self.estado == 'girar_der':
+            # Tu arco de curva perfecto
             twist.linear.x  = VEL_AVANCE_GIRO if d_f > 0.22 else 0.0
             twist.angular.z = -VEL_GIRO
-            evento = f'girar_der arco={twist.linear.x>0} t={tiempo_girando:.1f}s'
+            evento = f'girar_der arco={twist.linear.x>0} t={tiempo_generado_en_giro:.1f}s'
             
         else:  # avanzar
             vel = self.velocidad_frenada(d_f, VEL_LINEAR_NORMAL)
