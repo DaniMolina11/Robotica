@@ -63,7 +63,7 @@ class MazeSolver(Node):
         self.giro_comprometido       = False
         self.ticks_fuera_pasillo     = 0
         
-        # Variable exclusiva para el U-Turn del callejón sin salida
+        # Variable para el giro sobre su eje (solo en callejones)
         self.giro_largo              = False
 
         self.META_X               = 2.75
@@ -204,7 +204,7 @@ class MazeSolver(Node):
         tiempo_girando = ahora - self.tiempo_inicio_giro
         en_pasillo     = (d_r < DIST_PASILLO and d_l < DIST_PASILLO)
 
-        # --- MÁQUINA DE ESTADOS ORIGINAL DE TUS CURVAS ---
+        # --- MÁQUINA DE ESTADOS ORIGINAL (TUYA AL 100%) ---
         if self.estado == 'pasillo':
             if en_pasillo:
                 self.ticks_fuera_pasillo = 0
@@ -232,12 +232,16 @@ class MazeSolver(Node):
                     self._cambiar_estado('avanzar', f'frente libre d_f={d_f:.2f}')
                     self.giro_largo = False 
                 elif d_f < DIST_PARAR_GIRO - 0.05:
-                    # En un callejón, como el frente sigue bloqueado tras 1.5s, 
-                    # forzamos a seguir girando sin cambiar de dirección (U-Turn)
-                    self.giro_comprometido = True
-                    self.tiempo_inicio_giro = ahora
-                    self.giro_largo = True  
-                    self._log_evento('Frente bloqueado tras curva -> Mantenemos el giro (U-Turn)')
+                    # EL GRAN FIX: ¿Estamos realmente encerrados (callejón sin salida)?
+                    if self.d_left < 0.35 and self.d_right < 0.35:
+                        # Callejón cerrado: Activamos modo peonza para dar la vuelta 180º
+                        self.giro_comprometido = True
+                        self.tiempo_inicio_giro = ahora
+                        self.giro_largo = True  
+                        self._log_evento('Frente y laterales bloqueados -> Mantenemos giro en el sitio (U-Turn)')
+                    else:
+                        # Curva normal cerrada: Recalculamos con tu código original y seguimos avanzando
+                        self._iniciar_giro(ahora)
 
         elif self.estado == 'escape':
             if d_f > DIST_PARAR_GIRO:
@@ -272,11 +276,10 @@ class MazeSolver(Node):
             evento = f'girar_der arco={twist.linear.x>0} t={tiempo_girando:.1f}s'
             
         else:  # avanzar
-            # --- TU SEGUIDOR DE PARED DERECHA ORIGINAL INTACTO ---
+            # --- TU SEGUIDOR DE PARED ORIGINAL INTACTO ---
             vel = self.velocidad_frenada(d_f, VEL_LINEAR_NORMAL)
             twist.linear.x = vel
             if d_r > 1.2:
-                # Este era tu truco maestro para entrar bien en las curvas a la derecha
                 twist.angular.z = -0.20
                 evento = f'buscando_pared vel={vel:.3f}'
             else:
