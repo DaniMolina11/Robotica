@@ -18,6 +18,7 @@ DIST_PASILLO           = 0.45
 
 VEL_LINEAR_PASILLO    = 0.06
 VEL_LINEAR_NORMAL     = 0.08
+VEL_RETROCESO         = 0.05
 VEL_GIRO              = 0.28   
 VEL_AVANCE_GIRO       = 0.06   
 KP                    = 1.2
@@ -61,6 +62,8 @@ class MazeSolver(Node):
         self.tiempo_inicio_giro      = 0.0
         self.giro_comprometido       = False
         self.ticks_fuera_pasillo     = 0
+        
+        self.giro_desde_retroceso    = False
 
         self.META_X               = 2.75
         self.META_Y               = 1.71
@@ -199,7 +202,7 @@ class MazeSolver(Node):
         tiempo_girando = ahora - self.tiempo_inicio_giro
         en_pasillo     = (d_r < DIST_PASILLO and d_l < DIST_PASILLO)
 
-        # --- MÁQUINA DE ESTADOS ORIGINAL (TUYA AL 100%) ---
+        # --- MÁQUINA DE ESTADOS ORIGINAL ---
         if self.estado == 'pasillo':
             if en_pasillo:
                 self.ticks_fuera_pasillo = 0
@@ -218,33 +221,43 @@ class MazeSolver(Node):
             elif d_f < DIST_PARAR_GIRO:
                 self._iniciar_giro(ahora)
 
+        elif self.estado == 'retroceder':
+            # Vamos marcha atrás hasta ver el cruce por donde entramos
+            if self.d_left > 0.35 or self.d_right > 0.35:
+                lado = 'izq' if self.d_left > self.d_right else 'der'
+                self._cambiar_estado(f'girar_{lado}', f'Cruce encontrado atrás. Pivotando hacia {lado}')
+                self.tiempo_inicio_giro = ahora
+                self.giro_comprometido  = True
+                self.giro_desde_retroceso = True # Activamos el pivote estático
+                
         elif self.estado in ('girar_izq', 'girar_der'):
             if self.giro_comprometido:
-                if tiempo_girando >= TIEMPO_GIRO_MINIMO:
+                # Si salimos de marcha atrás, forzamos un giro ciego de 5.2s (casi 90º) para no comer la esquina
+                tiempo_seguro = 5.2 if self.giro_desde_retroceso else TIEMPO_GIRO_MINIMO
+                if tiempo_girando >= tiempo_seguro:
                     self.giro_comprometido = False
             else:
                 if d_f >= DIST_PARAR_GIRO + 0.10:
                     self._cambiar_estado('avanzar', f'frente libre d_f={d_f:.2f}')
+                    self.giro_desde_retroceso = False 
                 elif d_f < DIST_PARAR_GIRO - 0.05:
-                    # EL TEST INFALIBLE: ¿Es una curva o un callejón?
-                    # Comprobamos las diagonales para no asustarnos en curvas normales
-                    if self.d_diag_izq < 0.31 and self.d_diag_der < 0.31:
-                        self._cambiar_estado('callejon_giro', 'Atrapado. Iniciando peonza 180.')
-                        self.tiempo_inicio_giro = ahora
+                    if self.giro_desde_retroceso:
+                        pass # Seguimos pivotando si venimos de atrás
                     else:
-                        # Curva normal, recalculamos con tu lógica original
-                        self._iniciar_giro(ahora)
-                        
-        elif self.estado == 'callejon_giro':
-            # Rotamos en el sitio durante 9.5 segundos (lo que falta para completar la media vuelta)
-            if tiempo_girando >= 9.5:
-                self._cambiar_estado('avanzar', 'Giro de 180 completado')
+                        # EL TEST INFALIBLE: Hemos girado 1.5s y el frente sigue tapado.
+                        # ¿Las paredes laterales nos aplastan y no podemos rotar?
+                        if self.d_diag_izq < 0.31 and self.d_diag_der < 0.31:
+                            self._cambiar_estado('retroceder', 'CALLEJÓN ESTRECHO FÍSICO. Imposible rotar, marcha atrás.')
+                            self.reset_filtros()
+                        else:
+                            # Era solo una curva muy cerrada, recalculamos tu curva original
+                            self._iniciar_giro(ahora)
 
         elif self.estado == 'escape':
             if d_f > DIST_PARAR_GIRO:
                 self._cambiar_estado('avanzar', 'escape completado')
 
-        # --- APLICACIÓN DE VELOCIDADES ORIGINALES ---
+        # --- APLICACIÓN DE VELOCIDADES ---
         evento = ''
 
         if self.estado == 'pasillo':
@@ -252,23 +265,33 @@ class MazeSolver(Node):
             twist.angular.z = 0.0
             evento = f'pasillo_recto f={d_f:.2f}'
 
+        elif self.estado == 'retroceder':
+            # Marcha atrás lenta y recta hasta salir del atolladero
+            if self.d_back > 0.10:
+                twist.linear.x = -VEL_RETROCESO
+            else:
+                twist.linear.x = 0.0
+            twist.angular.z = 0.0
+            evento = f'retrocediendo B={self.d_back:.2f}'
+
         elif self.estado == 'escape':
             twist.linear.x  = -0.05
             twist.angular.z = VEL_GIRO
             evento = 'escape'
 
-        elif self.estado == 'callejon_giro':
-            twist.linear.x = 0.0
-            twist.angular.z = VEL_GIRO
-            evento = f'girando_180 t={tiempo_girando:.1f}s'
-
         elif self.estado == 'girar_izq':
-            twist.linear.x  = VEL_AVANCE_GIRO if d_f > 0.22 else 0.0
+            if self.giro_desde_retroceso:
+                twist.linear.x = 0.0 # Pivotar en el sitio si salimos de marcha atrás
+            else:
+                twist.linear.x  = VEL_AVANCE_GIRO if d_f > 0.22 else 0.0 # Curva normal
             twist.angular.z = VEL_GIRO
             evento = f'girar_izq arco={twist.linear.x > 0} t={tiempo_girando:.1f}s'
 
         elif self.estado == 'girar_der':
-            twist.linear.x  = VEL_AVANCE_GIRO if d_f > 0.22 else 0.0
+            if self.giro_desde_retroceso:
+                twist.linear.x = 0.0 # Pivotar en el sitio si salimos de marcha atrás
+            else:
+                twist.linear.x  = VEL_AVANCE_GIRO if d_f > 0.22 else 0.0 # Curva normal
             twist.angular.z = -VEL_GIRO
             evento = f'girar_der arco={twist.linear.x > 0} t={tiempo_girando:.1f}s'
 
