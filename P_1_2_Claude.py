@@ -9,7 +9,7 @@ import math
 import time
 from collections import deque
 
-# --- PARÁMETROS ORIGINALES (CONSERVADOS AL 100%) ---
+# --- PARAMETROS ORIGINALES (CONSERVADOS AL 100%) ---
 DIST_GIRO_PASILLO      = 0.32
 DIST_PARAR_GIRO        = 0.32
 DIST_FRENAR            = 0.55
@@ -29,7 +29,7 @@ TIEMPO_GIRO_MINIMO    = 1.5
 N_LECTURAS_PROMEDIO   = 5
 TICKS_CONFIRMACION    = 4
 
-# --- PARÁMETROS DE RESPALDO ---
+# --- PARAMETROS DE RESPALDO ---
 TIEMPO_MAX_RETROCESO  = 3.0
 DIST_RETROCESO_OK     = 0.18
 DIST_SALIDA_LATERAL   = 0.35
@@ -127,6 +127,15 @@ class MazeSolver(Node):
     def promedio(self, buf):
         return sum(buf) / len(buf) if buf else 3.0
 
+    # --- RESTAURADA: FUNCION DE VELOCIDAD DE FRENADO ---
+    def velocidad_frenada(self, d_front, vel_max):
+        if d_front >= DIST_FRENAR:
+            return vel_max
+        if d_front <= DIST_PARAR_GIRO:
+            return 0.0
+        ratio = (d_front - DIST_PARAR_GIRO) / (DIST_FRENAR - DIST_PARAR_GIRO)
+        return round(vel_max * ratio, 3)
+
     def scan_callback(self, msg):
         r = msg.ranges
         if len(r) < 360:
@@ -214,11 +223,7 @@ class MazeSolver(Node):
         en_pasillo     = (d_r < DIST_PASILLO and d_l < DIST_PASILLO)
 
         # ----------------------------------------------------------------
-        # ELIMINADAS LAS INTERRUPCIONES DE RETROCESO (0% MARCHA ATRÁS)
-        # ----------------------------------------------------------------
-
-        # ----------------------------------------------------------------
-        # MÁQUINA DE ESTADOS ORIGINAL (CONSERVADA AL 100%)
+        # MAQUINA DE ESTADOS ORIGINAL (CONSERVADA AL 100%)
         # ----------------------------------------------------------------
         if self.estado == 'pasillo':
             if en_pasillo:
@@ -262,10 +267,9 @@ class MazeSolver(Node):
                 if d_f >= DIST_PARAR_GIRO + 0.10:
                     self._cambiar_estado('avanzar', f'frente libre d_f={d_f:.2f}')
                 elif d_f < DIST_PARAR_GIRO - 0.05:
-                    # --- PARCHE ANTI-BUCLE CALLEJÓN ---
-                    # Si el tiempo mínimo expiró pero el frente sigue bloqueado,
-                    # obligamos al robot a mantener la misma dirección actual de giro.
-                    # Evita el zigzag y le obliga a dar la vuelta completa hacia adelante.
+                    # --- PARCHE ANTI-BUCLE CALLEJON ---
+                    # Si el tiempo minimo expiro pero el frente sigue bloqueado,
+                    # obligamos al robot a mantener la misma direccion actual de giro.
                     self.giro_comprometido = True
                     self.tiempo_inicio_giro = ahora
                     self._log_evento(f'Manteniendo el giro actual en {self.estado}')
@@ -275,7 +279,7 @@ class MazeSolver(Node):
                 self._cambiar_estado('avanzar', 'escape completado')
 
         # ----------------------------------------------------------------
-        # APLICACIÓN DE VELOCIDADES ORIGINALES (INALTERADAS)
+        # APLICACION DE VELOCIDADES ORIGINALES (INALTERADAS)
         # ----------------------------------------------------------------
         evento = ''
 
