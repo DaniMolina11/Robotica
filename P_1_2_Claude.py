@@ -233,6 +233,8 @@ class MazeSolver(Node):
                     self._cambiar_estado('avanzar', f'frente libre d_f={d_f:.2f}')
                 elif d_f < DIST_PARAR_GIRO - 0.05:
                     # --- PARCHE ANTI-OSCILACION CALLEJON ---
+                    # Si el tiempo minimo expiro pero el frente sigue bloqueado,
+                    # renovamos el giro obligatorio manteniendo el mismo estado actual.
                     self.giro_comprometido = True
                     self.tiempo_inicio_giro = ahora
                     self._log_evento(f'Manteniendo el giro actual en {self.estado}')
@@ -242,7 +244,7 @@ class MazeSolver(Node):
                 self._cambiar_estado('avanzar', 'escape completado')
 
         # ----------------------------------------------------------------
-        # APLICACION DE VELOCIDADES CON FILTRO DE CALLEJON ESTRECHO
+        # APLICACION DE VELOCIDADES ORIGINALES (100% INTELIGENCIA TUYA)
         # ----------------------------------------------------------------
         evento = ''
 
@@ -257,23 +259,12 @@ class MazeSolver(Node):
             evento = 'escape'
 
         elif self.estado == 'girar_izq':
-            # --- ESCUDO ANTI-CHOQUE EN CALLEJON ---
-            # Si ambos laterales estan muy cerca, estamos encajonados: forzamos avance CERO
-            if d_l < 0.32 and d_r < 0.32:
-                twist.linear.x = 0.0
-            else:
-                twist.linear.x = VEL_AVANCE_GIRO if d_f > 0.22 else 0.0
-                
+            twist.linear.x  = VEL_AVANCE_GIRO if d_f > 0.22 else 0.0
             twist.angular.z = VEL_GIRO
             evento = f'girar_izq arco={twist.linear.x > 0} t={tiempo_girando:.1f}s'
 
         elif self.estado == 'girar_der':
-            # --- ESCUDO ANTI-CHOQUE EN CALLEJON ---
-            if d_l < 0.32 and d_r < 0.32:
-                twist.linear.x = 0.0
-            else:
-                twist.linear.x = VEL_AVANCE_GIRO if d_f > 0.22 else 0.0
-                
+            twist.linear.x  = VEL_AVANCE_GIRO if d_f > 0.22 else 0.0
             twist.angular.z = -VEL_GIRO
             evento = f'girar_der arco={twist.linear.x > 0} t={tiempo_girando:.1f}s'
 
