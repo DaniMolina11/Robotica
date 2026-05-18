@@ -204,7 +204,7 @@ class MazeSolver(Node):
         en_pasillo     = (d_r < DIST_PASILLO and d_l < DIST_PASILLO)
 
         # ----------------------------------------------------------------
-        # MAQUINA DE ESTADOS ORIGINAL (CON TU LOGICA DE CURVAS)
+        # MAQUINA DE ESTADOS ORIGINAL (CONSERVADA AL 100%)
         # ----------------------------------------------------------------
         if self.estado == 'pasillo':
             if en_pasillo:
@@ -233,8 +233,6 @@ class MazeSolver(Node):
                     self._cambiar_estado('avanzar', f'frente libre d_f={d_f:.2f}')
                 elif d_f < DIST_PARAR_GIRO - 0.05:
                     # --- PARCHE ANTI-OSCILACION CALLEJON ---
-                    # Si el tiempo minimo expiro pero el frente sigue bloqueado,
-                    # obligamos al robot a mantener el mismo sentido de giro actual.
                     self.giro_comprometido = True
                     self.tiempo_inicio_giro = ahora
                     self._log_evento(f'Manteniendo el giro actual en {self.estado}')
@@ -244,7 +242,7 @@ class MazeSolver(Node):
                 self._cambiar_estado('avanzar', 'escape completado')
 
         # ----------------------------------------------------------------
-        # APLICACION DE VELOCIDADES ORIGINALES (INALTERADAS)
+        # APLICACION DE VELOCIDADES CON FILTRO DE CALLEJON ESTRECHO
         # ----------------------------------------------------------------
         evento = ''
 
@@ -259,12 +257,23 @@ class MazeSolver(Node):
             evento = 'escape'
 
         elif self.estado == 'girar_izq':
-            twist.linear.x  = VEL_AVANCE_GIRO if d_f > 0.22 else 0.0
+            # --- ESCUDO ANTI-CHOQUE EN CALLEJON ---
+            # Si ambos laterales estan muy cerca, estamos encajonados: forzamos avance CERO
+            if d_l < 0.32 and d_r < 0.32:
+                twist.linear.x = 0.0
+            else:
+                twist.linear.x = VEL_AVANCE_GIRO if d_f > 0.22 else 0.0
+                
             twist.angular.z = VEL_GIRO
             evento = f'girar_izq arco={twist.linear.x > 0} t={tiempo_girando:.1f}s'
 
         elif self.estado == 'girar_der':
-            twist.linear.x  = VEL_AVANCE_GIRO if d_f > 0.22 else 0.0
+            # --- ESCUDO ANTI-CHOQUE EN CALLEJON ---
+            if d_l < 0.32 and d_r < 0.32:
+                twist.linear.x = 0.0
+            else:
+                twist.linear.x = VEL_AVANCE_GIRO if d_f > 0.22 else 0.0
+                
             twist.angular.z = -VEL_GIRO
             evento = f'girar_der arco={twist.linear.x > 0} t={tiempo_girando:.1f}s'
 
@@ -288,7 +297,6 @@ class MazeSolver(Node):
 
     def __del__(self):
         try:
-            self._log_raw('=== FIN SESION ===')
             self.log_file.close()
         except Exception:
             pass
@@ -302,7 +310,6 @@ def main(args=None):
     except KeyboardInterrupt:
         pass
     finally:
-        nodo._log_raw('=== INTERRUPCION USUARIO ===')
         nodo.cmd_pub.publish(Twist())
         nodo.log_file.close()
         nodo.destroy_node()
