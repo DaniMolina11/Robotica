@@ -29,11 +29,6 @@ TIEMPO_GIRO_MINIMO    = 1.5
 N_LECTURAS_PROMEDIO   = 5
 TICKS_CONFIRMACION    = 4
 
-# --- PARAMETROS DE RESPALDO PARA EL RETROCESO ---
-TIEMPO_MAX_RETROCESO  = 3.0
-DIST_RETROCESO_OK     = 0.18
-DIST_SALIDA_LATERAL   = 0.35
-
 LOG_FILE = '/home/ros/Escriptori/Robotica/maze_log.txt'
 
 
@@ -70,13 +65,6 @@ class MazeSolver(Node):
         self.tiempo_inicio_giro      = 0.0
         self.giro_comprometido       = False
         self.ticks_fuera_pasillo     = 0
-
-        self.tiempo_inicio_retroceso = 0.0
-        self.retroceso_forzado       = False  
-        self.lado_giro_forzado       = None   
-        
-        # Nueva variable de control estricto para el callejon
-        self.giro_desde_retroceso    = False  
 
         self.META_X               = 2.75
         self.META_Y               = 1.71
@@ -191,15 +179,6 @@ class MazeSolver(Node):
         self.tiempo_inicio_giro = ahora
         self.giro_comprometido  = True
 
-    def _iniciar_retroceso(self, ahora, motivo=''):
-        self._cambiar_estado('retroceder', motivo)
-        self.giro_comprometido       = False
-        self.tiempo_inicio_retroceso = ahora
-        self.retroceso_forzado       = False
-        self.lado_giro_forzado       = None
-        self.giro_desde_retroceso    = False
-        self.reset_filtros()
-
     def control_loop(self):
         twist = Twist()
 
@@ -222,28 +201,10 @@ class MazeSolver(Node):
 
         ahora          = time.time()
         tiempo_girando = ahora - self.tiempo_inicio_giro
-        tiempo_retrocediendo = ahora - self.tiempo_inicio_retroceso
         en_pasillo     = (d_r < DIST_PASILLO and d_l < DIST_PASILLO)
 
         # ----------------------------------------------------------------
-        # TUS REGLAS DE SEGURIDAD PROTEGIDAS ORIGINALES (CONSERVADAS)
-        # ----------------------------------------------------------------
-        if self.estado in ('avanzar', 'pasillo'):
-            callejon_muerto = (d_f <= 0.24 and d_l < 0.30 and d_r < 0.30)
-            if callejon_muerto:
-                self._iniciar_retroceso(ahora, 'callejon detectado (frente y laterales bloqueados)')
-                return
-
-        if self.estado in ('avanzar', 'pasillo'):
-            esquina_cerrada = (d_f < DIST_ESQUINA_CERRADA and
-                               d_r < DIST_ESQUINA_CERRADA + 0.05 and
-                               d_l < DIST_ESQUINA_CERRADA + 0.05)
-            if esquina_cerrada:
-                self._iniciar_retroceso(ahora, 'emergencia: esquina cerrada')
-                return
-
-        # ----------------------------------------------------------------
-        # MÁQUINA DE ESTADOS ORIGINAL (CONSERVADA AL 100%)
+        # MAQUINA DE ESTADOS ORIGINAL
         # ----------------------------------------------------------------
         if self.estado == 'pasillo':
             if en_pasillo:
@@ -263,26 +224,6 @@ class MazeSolver(Node):
             elif d_f < DIST_PARAR_GIRO:
                 self._iniciar_giro(ahora)
 
-        elif self.estado == 'retroceder':
-            if self.d_left > DIST_SALIDA_LATERAL or self.d_right > DIST_SALIDA_LATERAL:
-                lado = 'izq' if self.d_left > self.d_right else 'der'
-                self._log_evento(f'salida lateral encontrada: lado={lado} L={self.d_left:.2f} R={self.d_right:.2f}')
-                self._cambiar_estado(f'girar_{lado}', f'salida trasera encontrada hacia {lado}')
-                self.tiempo_inicio_giro = ahora
-                self.giro_comprometido  = True
-                self.giro_desde_retroceso = True  # Activamos el escudo del callejon
-            elif tiempo_retrocediendo >= TIEMPO_MAX_RETROCESO:
-                if not self.retroceso_forzado:
-                    self.retroceso_forzado  = True
-                    self.lado_giro_forzado  = 'izq' if self.d_left >= self.d_right else 'der'
-                    self._log_evento(f'RETROCESO TIMEOUT -> giro forzado hacia {self.lado_giro_forzado}')
-                    self._cambiar_estado(f'girar_{self.lado_giro_forzado}', 'timeout retroceso')
-                    self.tiempo_inicio_giro = ahora
-                    self.giro_comprometido  = True
-                    self.giro_desde_retroceso = True  # Activamos el escudo del callejon
-            elif self.d_back <= DIST_RETROCESO_OK:
-                self._log_evento(f'PARED TRASERA CERCA B={self.d_back:.2f}, esperando salida lateral')
-
         elif self.estado in ('girar_izq', 'girar_der'):
             if self.giro_comprometido:
                 if tiempo_girando >= TIEMPO_GIRO_MINIMO:
@@ -290,20 +231,20 @@ class MazeSolver(Node):
             else:
                 if d_f >= DIST_PARAR_GIRO + 0.10:
                     self._cambiar_estado('avanzar', f'frente libre d_f={d_f:.2f}')
-                    self.giro_desde_retroceso = False  # Desactivamos el escudo al salir al pasillo libre
                 elif d_f < DIST_PARAR_GIRO - 0.05:
-                    # Si venimos de dar marcha atras, evitamos que reevalue y cambie de direccion
-                    if self.giro_desde_retroceso:
-                        pass 
-                    else:
-                        self._iniciar_giro(ahora)
+                    # --- PARCHE DEFINITIVO ANTI-ZIGZAG ---
+                    # En lugar de usar _iniciar_giro(), que vuelve a calcular lados y te choca,
+                    # obligamos al robot a MANTENER su giro actual sin dudar ni avanzar.
+                    self.giro_comprometido = True
+                    self.tiempo_inicio_giro = ahora
+                    self._log_evento(f'Renovando giro en direccion actual: {self.estado}')
 
         elif self.estado == 'escape':
             if d_f > DIST_PARAR_GIRO:
                 self._cambiar_estado('avanzar', 'escape completado')
 
         # ----------------------------------------------------------------
-        # APLICACIÓN DE VELOCIDADES ORIGINALES (100% INTACTAS)
+        # APLICACION DE VELOCIDADES ORIGINALES (100% INTACTAS)
         # ----------------------------------------------------------------
         evento = ''
 
@@ -312,37 +253,18 @@ class MazeSolver(Node):
             twist.angular.z = 0.0
             evento = f'pasillo_recto f={d_f:.2f}'
 
-        elif self.estado == 'retroceder':
-            if self.d_back > DIST_RETROCESO_OK:
-                twist.linear.x = -VEL_RETROCESO
-                evento = f'retrocediendo B={self.d_back:.2f} t={tiempo_retrocediendo:.1f}s'
-            else:
-                twist.linear.x = 0.0
-                evento = f'retroceso_parado B={self.d_back:.2f}'
-            twist.angular.z = 0.0   
-
         elif self.estado == 'escape':
             twist.linear.x  = -0.05
             twist.angular.z = VEL_GIRO
             evento = 'escape'
 
         elif self.estado == 'girar_izq':
-            # Si el escudo esta activo por venir de marcha atras, giro puro en el sitio (0.0)
-            if self.giro_desde_retroceso:
-                twist.linear.x = 0.0
-            else:
-                twist.linear.x  = VEL_AVANCE_GIRO if d_f > 0.22 else 0.0
-                
+            twist.linear.x  = VEL_AVANCE_GIRO if d_f > 0.22 else 0.0
             twist.angular.z = VEL_GIRO
             evento = f'girar_izq arco={twist.linear.x > 0} t={tiempo_girando:.1f}s'
 
         elif self.estado == 'girar_der':
-            # Si el escudo esta activo por venir de marcha atras, giro puro en el sitio (0.0)
-            if self.giro_desde_retroceso:
-                twist.linear.x = 0.0
-            else:
-                twist.linear.x  = VEL_AVANCE_GIRO if d_f > 0.22 else 0.0
-                
+            twist.linear.x  = VEL_AVANCE_GIRO if d_f > 0.22 else 0.0
             twist.angular.z = -VEL_GIRO
             evento = f'girar_der arco={twist.linear.x > 0} t={tiempo_girando:.1f}s'
 
@@ -366,6 +288,7 @@ class MazeSolver(Node):
 
     def __del__(self):
         try:
+            self._log_raw('=== FIN SESION ===')
             self.log_file.close()
         except Exception:
             pass
@@ -379,6 +302,7 @@ def main(args=None):
     except KeyboardInterrupt:
         pass
     finally:
+        nodo._log_raw('=== INTERRUPCION USUARIO ===')
         nodo.cmd_pub.publish(Twist())
         nodo.log_file.close()
         nodo.destroy_node()
