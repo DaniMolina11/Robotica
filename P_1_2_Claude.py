@@ -15,7 +15,6 @@ DIST_PARAR_GIRO        = 0.32
 DIST_FRENAR            = 0.55   
 DIST_PARED_DERECHA     = 0.25   
 DIST_PASILLO           = 0.45   
-DIST_ESQUINA_CERRADA   = 0.20   
 DIST_SEGURIDAD_TRASERA = 0.15   
 
 VEL_LINEAR_PASILLO    = 0.06
@@ -214,20 +213,19 @@ class MazeSolver(Node):
         tiempo_girando = ahora - self.tiempo_inicio_giro
         en_pasillo     = (d_r < DIST_PASILLO and d_l < DIST_PASILLO)
 
-        # =========================================================================
-        # REGLA MAESTRA DE SUPERVIVENCIA (PROTECCIÓN DEL CALLEJÓN)
-        # =========================================================================
-        # Si el robot está avanzando O INCLUSO si acaba de empezar a girar, y 
-        # detecta que está acorralado por los tres lados, fuerza la marcha atrás.
-        if self.estado in ('avanzar', 'pasillo', 'girar_izq', 'girar_der'):
-            if d_f <= 0.22 and self.d_left < 0.30 and self.d_right < 0.30:
-                if self.estado != 'retroceder':
-                    self._cambiar_estado('retroceder', 'Regla Maestra: Frente y laterales bloqueados -> Callejón')
-                    self.giro_comprometido = False
-                    self.reset_filtros()
-                    return
+        # --- REGLA PROTEGIDA EN LÍNEA RECTA (SOLO CUANDO AVANZA) ---
+        if self.estado in ('avanzar', 'pasillo'):
+            # Detectamos el callejón SOLO de frente para no asustarnos en medio de las curvas
+            callejon_muerto = (d_f <= 0.24 and d_l < 0.30 and d_r < 0.30)
+            if callejon_muerto:
+                self._cambiar_estado('retroceder', 'callejon detectado (frente y laterales bloqueados)')
+                self.giro_comprometido = False
+                self.reset_filtros()
+                return
 
-        # --- MÁQUINA DE ESTADOS 100% ORIGINAL ---
+        # ¡BORRADO EL BLOQUE "ESQUINA_CERRADA" QUE TE DESTROZABA LAS CURVAS!
+
+        # --- MÁQUINA DE ESTADOS ORIGINAL ---
         if self.estado == 'pasillo':
             if en_pasillo:
                 self.ticks_fuera_pasillo = 0
@@ -247,27 +245,28 @@ class MazeSolver(Node):
                 self._iniciar_giro(ahora)
 
         elif self.estado == 'retroceder':
-            # Detenemos la marcha atrás si vemos la salida O si tocamos el muro trasero
-            if self.d_left > 0.35 or self.d_right > 0.35 or self.d_back <= DIST_SEGURIDAD_TRASERA:
+            # Baja a 0.35 para detectar la salida rápido, O si tocamos la pared de atrás para no congelarnos
+            if self.d_left > 0.35 or self.d_right > 0.35 or self.d_back <= DIST_SEGURIDAD_TRASERA + 0.02:
                 lado = 'izq' if self.d_left > self.d_right else 'der'
-                self._cambiar_estado(f'girar_{lado}', f'salida trasera o muro detectado hacia {lado}')
+                self._cambiar_estado(f'girar_{lado}', f'salida o muro trasero, girando hacia {lado}')
                 self.tiempo_inicio_giro = ahora
                 self.giro_comprometido  = True
-                self.giro_desde_retroceso = True # Activa el modo de rotación limpia en el sitio
+                self.giro_desde_retroceso = True # Activamos el escudo para rotar en el sitio
 
         elif self.estado in ('girar_izq', 'girar_der'):
             if self.giro_comprometido:
-                # Si venimos de retroceder, rotamos en el sitio 5.2s (90º) para no comer la esquina
-                tiempo_seguro = 5.2 if self.giro_desde_retroceso else TIEMPO_GIRO_MINIMO
-                if tiempo_girando >= tiempo_seguro:
+                # Si salimos del callejón, giramos 4.0 segundos en el sitio para no chocar el morro al salir
+                limite = 4.0 if self.giro_desde_retroceso else TIEMPO_GIRO_MINIMO
+                if tiempo_girando >= limite:
                     self.giro_comprometido = False
             else:
                 if d_f >= DIST_PARAR_GIRO + 0.10:
                     self._cambiar_estado('avanzar', f'frente libre d_f={d_f:.2f}')
                     self.giro_desde_retroceso = False 
                 elif d_f < DIST_PARAR_GIRO - 0.05:
-                    if not self.giro_desde_retroceso:
-                        # Tu código original: si seguimos tapados en curva normal, recalculamos
+                    if self.giro_desde_retroceso:
+                        pass # Seguimos rotando en el sitio hasta ver el pasillo totalmente abierto
+                    else:
                         self._iniciar_giro(ahora)
 
         elif self.estado == 'escape':
@@ -287,7 +286,7 @@ class MazeSolver(Node):
             else:
                 twist.linear.x = 0.0
             twist.angular.z = 0.0  
-            evento = f'retrocediendo_recto_puro B={self.d_back:.2f}'
+            evento = f'retrocediendo_recto B={self.d_back:.2f}'
             
         elif self.estado == 'escape':
             twist.linear.x  = -0.05
@@ -296,21 +295,21 @@ class MazeSolver(Node):
             
         elif self.estado == 'girar_izq':
             if self.giro_desde_retroceso:
-                twist.linear.x = 0.0 # Rotar sobre su eje
+                twist.linear.x = 0.0 # Rotar sobre su eje al salir del callejon
             else:
-                twist.linear.x  = VEL_AVANCE_GIRO if d_f > 0.22 else 0.0 # Tu arco de curva normal
+                twist.linear.x  = VEL_AVANCE_GIRO if d_f > 0.22 else 0.0 # Tu curva de siempre
             twist.angular.z = VEL_GIRO
             evento = f'girar_izq arco={twist.linear.x>0} t={tiempo_girando:.1f}s'
             
         elif self.estado == 'girar_der':
             if self.giro_desde_retroceso:
-                twist.linear.x = 0.0 # Rotar sobre su eje
+                twist.linear.x = 0.0 # Rotar sobre su eje al salir del callejon
             else:
-                twist.linear.x  = VEL_AVANCE_GIRO if d_f > 0.22 else 0.0 # Tu arco de curva normal
+                twist.linear.x  = VEL_AVANCE_GIRO if d_f > 0.22 else 0.0 # Tu curva de siempre
             twist.angular.z = -VEL_GIRO
             evento = f'girar_der arco={twist.linear.x>0} t={tiempo_girando:.1f}s'
             
-        else:  # avanzar (TUS VELOCIDADES Y SEGUIDOR DE PARED INTACTOS)
+        else:  # avanzar (TUS VALORES INTACTOS)
             vel = self.velocidad_frenada(d_f, VEL_LINEAR_NORMAL)
             twist.linear.x = vel
             if d_r > 1.2:
