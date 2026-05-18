@@ -20,6 +20,7 @@ DIST_SEGURIDAD_TRASERA = 0.15
 
 VEL_LINEAR_PASILLO    = 0.06
 VEL_LINEAR_NORMAL     = 0.08
+VEL_RETROCESO         = 0.05
 VEL_GIRO              = 0.28
 VEL_AVANCE_GIRO       = 0.06
 KP                    = 1.2
@@ -27,6 +28,11 @@ KP                    = 1.2
 TIEMPO_GIRO_MINIMO    = 1.5
 N_LECTURAS_PROMEDIO   = 5
 TICKS_CONFIRMACION    = 4
+
+# --- PARÁMETROS DE RESPALDO ---
+TIEMPO_MAX_RETROCESO  = 3.0
+DIST_RETROCESO_OK     = 0.18
+DIST_SALIDA_LATERAL   = 0.35
 
 LOG_FILE = '/home/ros/Escriptori/Robotica/maze_log.txt'
 
@@ -64,6 +70,10 @@ class MazeSolver(Node):
         self.tiempo_inicio_giro      = 0.0
         self.giro_comprometido       = False
         self.ticks_fuera_pasillo     = 0
+
+        self.tiempo_inicio_retroceso = 0.0
+        self.retroceso_forzado       = False  
+        self.lado_giro_forzado       = None   
 
         self.META_X               = 2.75
         self.META_Y               = 1.71
@@ -170,6 +180,14 @@ class MazeSolver(Node):
         self.tiempo_inicio_giro = ahora
         self.giro_comprometido  = True
 
+    def _iniciar_retroceso(self, ahora, motivo=''):
+        self._cambiar_estado('retroceder', motivo)
+        self.giro_comprometido       = False
+        self.tiempo_inicio_retroceso = ahora
+        self.retroceso_forzado       = False
+        self.lado_giro_forzado       = None
+        self.reset_filtros()
+
     def control_loop(self):
         twist = Twist()
 
@@ -192,10 +210,15 @@ class MazeSolver(Node):
 
         ahora          = time.time()
         tiempo_girando = ahora - self.tiempo_inicio_giro
+        tiempo_retrocediendo = ahora - self.tiempo_inicio_retroceso
         en_pasillo     = (d_r < DIST_PASILLO and d_l < DIST_PASILLO)
 
         # ----------------------------------------------------------------
-        # MÁQUINA DE ESTADOS ORIGINAL (CON LA TRAJECTORIA DE CURVAS QUE TE GUSTABA)
+        # ELIMINADAS LAS INTERRUPCIONES DE RETROCESO (0% MARCHA ATRÁS)
+        # ----------------------------------------------------------------
+
+        # ----------------------------------------------------------------
+        # MÁQUINA DE ESTADOS ORIGINAL (CONSERVADA AL 100%)
         # ----------------------------------------------------------------
         if self.estado == 'pasillo':
             if en_pasillo:
@@ -215,6 +238,22 @@ class MazeSolver(Node):
             elif d_f < DIST_PARAR_GIRO:
                 self._iniciar_giro(ahora)
 
+        elif self.estado == 'retroceder':
+            if self.d_left > DIST_SALIDA_LATERAL or self.d_right > DIST_SALIDA_LATERAL:
+                lado = 'izq' if self.d_left > self.d_right else 'der'
+                self._cambiar_estado(f'girar_{lado}', f'salida trasera encontrada hacia {lado}')
+                self.tiempo_inicio_giro = ahora
+                self.giro_comprometido  = True
+            elif tiempo_retrocediendo >= TIEMPO_MAX_RETROCESO:
+                if not self.retroceso_forzado:
+                    self.retroceso_forzado  = True
+                    self.lado_giro_forzado  = 'izq' if self.d_left >= self.d_right else 'der'
+                    self._cambiar_estado(f'girar_{self.lado_giro_forzado}', 'timeout retroceso')
+                    self.tiempo_inicio_giro = ahora
+                    self.giro_comprometido  = True
+            elif self.d_back <= DIST_RETROCESO_OK:
+                pass
+
         elif self.estado in ('girar_izq', 'girar_der'):
             if self.giro_comprometido:
                 if tiempo_girando >= TIEMPO_GIRO_MINIMO:
@@ -225,11 +264,11 @@ class MazeSolver(Node):
                 elif d_f < DIST_PARAR_GIRO - 0.05:
                     # --- PARCHE ANTI-BUCLE CALLEJÓN ---
                     # Si el tiempo mínimo expiró pero el frente sigue bloqueado,
-                    # obligamos al robot a mantener el mismo sentido de giro actual.
-                    # Esto evita el zigzag y le obliga a dar la vuelta completa (180º).
+                    # obligamos al robot a mantener la misma dirección actual de giro.
+                    # Evita el zigzag y le obliga a dar la vuelta completa hacia adelante.
                     self.giro_comprometido = True
                     self.tiempo_inicio_giro = ahora
-                    self._log_evento(f'Manteniendo dirección en {self.estado} para completar U-turn')
+                    self._log_evento(f'Manteniendo el giro actual en {self.estado}')
 
         elif self.estado == 'escape':
             if d_f > DIST_PARAR_GIRO:
@@ -244,6 +283,15 @@ class MazeSolver(Node):
             twist.linear.x  = VEL_LINEAR_PASILLO
             twist.angular.z = 0.0
             evento = f'pasillo_recto f={d_f:.2f}'
+
+        elif self.estado == 'retroceder':
+            if self.d_back > DIST_RETROCESO_OK:
+                twist.linear.x = -VEL_RETROCESO
+                evento = f'retrocediendo B={self.d_back:.2f}'
+            else:
+                twist.linear.x = 0.0
+                evento = f'retroceso_parado B={self.d_back:.2f}'
+            twist.angular.z = 0.0   
 
         elif self.estado == 'escape':
             twist.linear.x  = -0.05
