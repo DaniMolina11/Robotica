@@ -114,15 +114,6 @@ class MazeSolver(Node):
     def promedio(self, buf):
         return sum(buf) / len(buf) if buf else 3.0
 
-    def reset_filtros(self):
-        self.buf_front.clear()
-        self.buf_right.clear()
-        self.buf_left.clear()
-        self.buf_back.clear()
-        self.buf_diag_izq.clear()
-        self.buf_diag_der.clear()
-        self.lecturas_acumuladas = 0
-
     def velocidad_frenada(self, d_front, vel_max):
         if d_front >= DIST_FRENAR:
             return vel_max
@@ -208,7 +199,7 @@ class MazeSolver(Node):
         tiempo_girando = ahora - self.tiempo_inicio_giro
         en_pasillo     = (d_r < DIST_PASILLO and d_l < DIST_PASILLO)
 
-        # --- MÁQUINA DE ESTADOS ORIGINAL ---
+        # --- MÁQUINA DE ESTADOS ORIGINAL (TUYA AL 100%) ---
         if self.estado == 'pasillo':
             if en_pasillo:
                 self.ticks_fuera_pasillo = 0
@@ -235,26 +226,25 @@ class MazeSolver(Node):
                 if d_f >= DIST_PARAR_GIRO + 0.10:
                     self._cambiar_estado('avanzar', f'frente libre d_f={d_f:.2f}')
                 elif d_f < DIST_PARAR_GIRO - 0.05:
-                    # EL TEST DE FUEGO: Ha pasado el tiempo y el frente está tapado. 
-                    # ¿Están también los laterales tapados a menos de 0.35?
-                    if self.d_left < 0.35 and self.d_right < 0.35:
-                        self._cambiar_estado('callejon_giro', 'Atrapado: Iniciando peonza 180')
+                    # EL TEST INFALIBLE: ¿Es una curva o un callejón?
+                    # Comprobamos las diagonales para no asustarnos en curvas normales
+                    if self.d_diag_izq < 0.31 and self.d_diag_der < 0.31:
+                        self._cambiar_estado('callejon_giro', 'Atrapado. Iniciando peonza 180.')
                         self.tiempo_inicio_giro = ahora
                     else:
-                        # Uno de los lados está abierto, así que es una curva normal: aplicamos tu código original
+                        # Curva normal, recalculamos con tu lógica original
                         self._iniciar_giro(ahora)
-
-        # --- ESTADO AISLADO PARA EL CALLEJÓN ---
+                        
         elif self.estado == 'callejon_giro':
-            # Seguimos girando en el sitio hasta que el frente se abra (pasillo largo)
-            if tiempo_girando > 1.0 and d_f > 0.45:
-                self._cambiar_estado('avanzar', 'Callejón resuelto, avanzando de cara')
+            # Rotamos en el sitio durante 9.5 segundos (lo que falta para completar la media vuelta)
+            if tiempo_girando >= 9.5:
+                self._cambiar_estado('avanzar', 'Giro de 180 completado')
 
         elif self.estado == 'escape':
             if d_f > DIST_PARAR_GIRO:
                 self._cambiar_estado('avanzar', 'escape completado')
 
-        # --- APLICACIÓN DE VELOCIDADES (TUS ORIGINALES) ---
+        # --- APLICACIÓN DE VELOCIDADES ORIGINALES ---
         evento = ''
 
         if self.estado == 'pasillo':
@@ -267,21 +257,20 @@ class MazeSolver(Node):
             twist.angular.z = VEL_GIRO
             evento = 'escape'
 
-        # Velocidades del estado aislado del callejón (peonza pura)
         elif self.estado == 'callejon_giro':
             twist.linear.x = 0.0
             twist.angular.z = VEL_GIRO
-            evento = f'girando_180 f={d_f:.2f}'
+            evento = f'girando_180 t={tiempo_girando:.1f}s'
 
         elif self.estado == 'girar_izq':
             twist.linear.x  = VEL_AVANCE_GIRO if d_f > 0.22 else 0.0
             twist.angular.z = VEL_GIRO
-            evento = f'girar_izq arco={twist.linear.x>0} t={tiempo_girando:.1f}s'
+            evento = f'girar_izq arco={twist.linear.x > 0} t={tiempo_girando:.1f}s'
 
         elif self.estado == 'girar_der':
             twist.linear.x  = VEL_AVANCE_GIRO if d_f > 0.22 else 0.0
             twist.angular.z = -VEL_GIRO
-            evento = f'girar_der arco={twist.linear.x>0} t={tiempo_girando:.1f}s'
+            evento = f'girar_der arco={twist.linear.x > 0} t={tiempo_girando:.1f}s'
 
         else:  # avanzar (CON TU TRUCO DE LA PARED DERECHA INTACTO)
             vel = self.velocidad_frenada(d_f, VEL_LINEAR_NORMAL)
