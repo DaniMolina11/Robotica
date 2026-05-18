@@ -63,6 +63,7 @@ class MazeSolver(Node):
         self.giro_comprometido       = False
         self.ticks_fuera_pasillo     = 0
         
+        # Variable exclusiva para el U-Turn del callejón sin salida
         self.giro_largo              = False
 
         self.META_X               = 2.75
@@ -116,15 +117,6 @@ class MazeSolver(Node):
 
     def promedio(self, buf):
         return sum(buf) / len(buf) if buf else 3.0
-
-    def reset_filtros(self):
-        self.buf_front.clear()
-        self.buf_right.clear()
-        self.buf_left.clear()
-        self.buf_back.clear()
-        self.buf_diag_izq.clear()
-        self.buf_diag_der.clear()
-        self.lecturas_acumuladas = 0
 
     def velocidad_frenada(self, d_front, vel_max):
         if d_front >= DIST_FRENAR:
@@ -212,7 +204,7 @@ class MazeSolver(Node):
         tiempo_girando = ahora - self.tiempo_inicio_giro
         en_pasillo     = (d_r < DIST_PASILLO and d_l < DIST_PASILLO)
 
-        # --- MÁQUINA DE ESTADOS ORIGINAL (CERO MARCHAS ATRÁS) ---
+        # --- MÁQUINA DE ESTADOS ORIGINAL DE TUS CURVAS ---
         if self.estado == 'pasillo':
             if en_pasillo:
                 self.ticks_fuera_pasillo = 0
@@ -241,7 +233,7 @@ class MazeSolver(Node):
                     self.giro_largo = False 
                 elif d_f < DIST_PARAR_GIRO - 0.05:
                     # En un callejón, como el frente sigue bloqueado tras 1.5s, 
-                    # mantenemos el giro de forma continua (U-Turn)
+                    # forzamos a seguir girando sin cambiar de dirección (U-Turn)
                     self.giro_comprometido = True
                     self.tiempo_inicio_giro = ahora
                     self.giro_largo = True  
@@ -265,7 +257,7 @@ class MazeSolver(Node):
             
         elif self.estado == 'girar_izq':
             if self.giro_largo:
-                twist.linear.x = 0.0 
+                twist.linear.x = 0.0 # Giro 180 en el sitio
             else:
                 twist.linear.x  = VEL_AVANCE_GIRO if d_f > 0.22 else 0.0 
             twist.angular.z = VEL_GIRO
@@ -273,38 +265,24 @@ class MazeSolver(Node):
             
         elif self.estado == 'girar_der':
             if self.giro_largo:
-                twist.linear.x = 0.0 
+                twist.linear.x = 0.0 # Giro 180 en el sitio
             else:
                 twist.linear.x  = VEL_AVANCE_GIRO if d_f > 0.22 else 0.0 
             twist.angular.z = -VEL_GIRO
             evento = f'girar_der arco={twist.linear.x>0} t={tiempo_girando:.1f}s'
             
         else:  # avanzar
+            # --- TU SEGUIDOR DE PARED DERECHA ORIGINAL INTACTO ---
             vel = self.velocidad_frenada(d_f, VEL_LINEAR_NORMAL)
             twist.linear.x = vel
-            
-            # --- TU IDEA DE ORO: EL CENTRADO DINÁMICO ---
-            umbral_pared = 0.50
-            if d_r < umbral_pared and d_l < umbral_pared:
-                # Vemos ambas paredes: nos centramos a la perfección
-                error = d_l - d_r
-                twist.angular.z = max(min(KP * error, 0.40), -0.40)
-                evento = f'centrando err={error:.3f}'
-            elif d_r < umbral_pared:
-                # Solo hay pared derecha (cruce a la izquierda abierto)
+            if d_r > 1.2:
+                # Este era tu truco maestro para entrar bien en las curvas a la derecha
+                twist.angular.z = -0.20
+                evento = f'buscando_pared vel={vel:.3f}'
+            else:
                 error = DIST_PARED_DERECHA - d_r
                 twist.angular.z = max(min(KP * error, 0.40), -0.40)
-                evento = f'pared_der err={error:.3f}'
-            elif d_l < umbral_pared:
-                # Solo hay pared izquierda (cruce a la derecha abierto)
-                error = d_l - DIST_PARED_DERECHA
-                twist.angular.z = max(min(KP * error, 0.40), -0.40)
-                evento = f'pared_izq err={error:.3f}'
-            else:
-                # Zona totalmente abierta
-                twist.angular.z = 0.0
-                evento = 'zona_abierta'
-
+                evento = f'siguiendo_pared_der err={error:.3f} vel={vel:.3f}'
             if vel < VEL_LINEAR_NORMAL:
                 evento += ' FRENANDO'
 
