@@ -190,6 +190,12 @@ class MazeSolver(Node):
         self.tiempo_inicio_giro = ahora
         self.giro_comprometido  = True
 
+    def _iniciar_retroceso(self, ahora, motivo=''):
+        self._cambiar_estado('retroceder', motivo)
+        self.giro_comprometido       = False
+        self.tiempo_inicio_retroceso = ahora
+        self.reset_filtros()
+
     def control_loop(self):
         twist = Twist()
 
@@ -214,17 +220,13 @@ class MazeSolver(Node):
         tiempo_girando = ahora - self.tiempo_inicio_giro
         en_pasillo     = (d_r < DIST_PASILLO and d_l < DIST_PASILLO)
 
-        # --- SÓLO DETECCIÓN DE CALLEJÓN REAL (CERO MARCHAS ATRÁS EN CURVAS) ---
+        # --- REGLA PROTEGIDA: Detección de callejón ---
         if self.estado in ('avanzar', 'pasillo'):
-            # Exigimos que esté MUY encajonado para que jamás confunda una curva normal con un callejón
-            callejon_muerto = (d_f <= 0.24 and d_l < 0.28 and d_r < 0.28)
+            # Detectamos el callejón si está bloqueado por los tres lados
+            callejon_muerto = (d_f <= 0.24 and d_l < 0.30 and d_r < 0.30)
             if callejon_muerto:
-                self._cambiar_estado('retroceder', 'callejon detectado (frente y laterales bloqueados)')
-                self.giro_comprometido = False
-                self.reset_filtros()  
+                self._iniciar_retroceso(ahora, 'callejon detectado')
                 return
-                
-        # (¡EL BLOQUE DE ESQUINA_CERRADA QUE TE CHOCABA HA SIDO BORRADO DE AQUÍ!)
 
         # --- MÁQUINA DE ESTADOS ORIGINAL ---
         if self.estado == 'pasillo':
@@ -246,6 +248,7 @@ class MazeSolver(Node):
                 self._iniciar_giro(ahora)
 
         elif self.estado == 'retroceder':
+            # Si vemos hueco a un lado, empezamos el giro y activamos el escudo
             if self.d_left > 0.35 or self.d_right > 0.35:
                 lado = 'izq' if self.d_left > self.d_right else 'der'
                 self._cambiar_estado(f'girar_{lado}', f'salida trasera encontrada hacia {lado}')
@@ -255,7 +258,9 @@ class MazeSolver(Node):
 
         elif self.estado in ('girar_izq', 'girar_der'):
             if self.giro_comprometido:
-                if tiempo_girando >= TIEMPO_GIRO_MINIMO:
+                # LA CLAVE: Si venimos de retroceder, giramos 90º (5.2 segs) antes de mirar el láser
+                tiempo_seguro = 5.2 if self.giro_desde_retroceso else TIEMPO_GIRO_MINIMO
+                if tiempo_girando >= tiempo_seguro:
                     self.giro_comprometido = False
             else:
                 if d_f >= DIST_PARAR_GIRO + 0.10:
@@ -274,6 +279,7 @@ class MazeSolver(Node):
 
         # --- APLICACIÓN DE VELOCIDADES ORIGINALES ---
         evento = ''
+
         if self.estado == 'pasillo':
             twist.linear.x  = VEL_LINEAR_PASILLO
             twist.angular.z = 0.0
@@ -284,8 +290,8 @@ class MazeSolver(Node):
                 twist.linear.x = -VEL_RETROCESO
             else:
                 twist.linear.x = 0.0
-            twist.angular.z = 0.0  
-            evento = f'retrocediendo_recto_puro B={self.d_back:.2f}'
+            twist.angular.z = 0.0
+            evento = f'retrocediendo_recto B={self.d_back:.2f}'
             
         elif self.estado == 'escape':
             twist.linear.x  = -0.05
@@ -298,7 +304,7 @@ class MazeSolver(Node):
             else:
                 twist.linear.x  = VEL_AVANCE_GIRO if d_f > 0.22 else 0.0
             twist.angular.z = VEL_GIRO
-            evento = f'girar_izq arco={twist.linear.x>0} t={tiempo_girando:.1f}s'
+            evento = f'girar_izq arco={twist.linear.x > 0} t={tiempo_girando:.1f}s'
             
         elif self.estado == 'girar_der':
             if self.giro_desde_retroceso:
@@ -306,7 +312,7 @@ class MazeSolver(Node):
             else:
                 twist.linear.x  = VEL_AVANCE_GIRO if d_f > 0.22 else 0.0
             twist.angular.z = -VEL_GIRO
-            evento = f'girar_der arco={twist.linear.x>0} t={tiempo_girando:.1f}s'
+            evento = f'girar_der arco={twist.linear.x > 0} t={tiempo_girando:.1f}s'
             
         else:  # avanzar
             vel = self.velocidad_frenada(d_f, VEL_LINEAR_NORMAL)
