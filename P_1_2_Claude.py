@@ -15,11 +15,9 @@ DIST_PARAR_GIRO        = 0.32
 DIST_FRENAR            = 0.55   
 DIST_PARED_DERECHA     = 0.25   
 DIST_PASILLO           = 0.45   
-DIST_SEGURIDAD_TRASERA = 0.12   
 
 VEL_LINEAR_PASILLO    = 0.06
 VEL_LINEAR_NORMAL     = 0.08
-VEL_RETROCESO         = 0.05
 VEL_GIRO              = 0.28   
 VEL_AVANCE_GIRO       = 0.06   
 KP                    = 1.2
@@ -63,8 +61,6 @@ class MazeSolver(Node):
         self.tiempo_inicio_giro      = 0.0
         self.giro_comprometido       = False
         self.ticks_fuera_pasillo     = 0
-        
-        self.giro_desde_retroceso    = False
 
         self.META_X               = 2.75
         self.META_Y               = 1.71
@@ -117,16 +113,6 @@ class MazeSolver(Node):
 
     def promedio(self, buf):
         return sum(buf) / len(buf) if buf else 3.0
-
-    # AHORA SÍ ESTÁ DEFINIDA LA FUNCIÓN PARA EVITAR EL CRASHEO
-    def reset_filtros(self):
-        self.buf_front.clear()
-        self.buf_right.clear()
-        self.buf_left.clear()
-        self.buf_back.clear()
-        self.buf_diag_izq.clear()
-        self.buf_diag_der.clear()
-        self.lecturas_acumuladas = 0
 
     def velocidad_frenada(self, d_front, vel_max):
         if d_front >= DIST_FRENAR:
@@ -213,17 +199,12 @@ class MazeSolver(Node):
         tiempo_girando = ahora - self.tiempo_inicio_giro
         en_pasillo     = (d_r < DIST_PASILLO and d_l < DIST_PASILLO)
 
-        # --- MÁQUINA DE ESTADOS (Detectando el callejón de antemano) ---
+        # --- MÁQUINA DE ESTADOS ORIGINAL (SIN MARCHAS ATRÁS) ---
         if self.estado == 'pasillo':
             if en_pasillo:
                 self.ticks_fuera_pasillo = 0
                 if d_f < DIST_GIRO_PASILLO:
-                    # Lógica humana: Mirar a los lados antes de girar.
-                    if self.d_left < 0.40 and self.d_right < 0.40:
-                        self._cambiar_estado('retroceder', 'Callejón cerrado detectado')
-                        self.reset_filtros()
-                    else:
-                        self._iniciar_giro(ahora)
+                    self._iniciar_giro(ahora)
             else:
                 self.ticks_fuera_pasillo += 1
                 if self.ticks_fuera_pasillo >= TICKS_CONFIRMACION:
@@ -235,41 +216,35 @@ class MazeSolver(Node):
                 self._cambiar_estado('pasillo', 'pasillo detectado')
                 self.ticks_fuera_pasillo = 0
             elif d_f < DIST_PARAR_GIRO:
-                # Lógica humana: Mirar a los lados antes de girar.
-                if self.d_left < 0.40 and self.d_right < 0.40:
-                    self._cambiar_estado('retroceder', 'Callejón cerrado detectado')
-                    self.reset_filtros()
-                else:
-                    self._iniciar_giro(ahora)
+                self._iniciar_giro(ahora)
 
-        elif self.estado == 'retroceder':
-            # Vamos marcha atrás hasta ver un cruce abierto
-            if self.d_left > 0.45 or self.d_right > 0.45:
-                lado = 'izq' if self.d_left > self.d_right else 'der'
-                self._cambiar_estado(f'girar_{lado}', f'Salida encontrada hacia {lado}')
-                self.tiempo_inicio_giro = ahora
-                self.giro_comprometido  = True
-                self.giro_desde_retroceso = True # Activamos el pivote de 90º ciego
-                
         elif self.estado in ('girar_izq', 'girar_der'):
             if self.giro_comprometido:
-                # Si salimos de marcha atrás, rotamos a ciegas 5.2s (90º) para no comer la esquina (Tail Swing)
-                tiempo_seguro = 5.2 if self.giro_desde_retroceso else TIEMPO_GIRO_MINIMO
-                if tiempo_girando >= tiempo_seguro:
+                if tiempo_girando >= TIEMPO_GIRO_MINIMO:
                     self.giro_comprometido = False
             else:
                 if d_f >= DIST_PARAR_GIRO + 0.10:
                     self._cambiar_estado('avanzar', f'frente libre d_f={d_f:.2f}')
-                    self.giro_desde_retroceso = False 
                 elif d_f < DIST_PARAR_GIRO - 0.05:
-                    if not self.giro_desde_retroceso:
+                    # TEST POST-CURVA: Si ha pasado 1.5s y el frente sigue bloqueado,
+                    # revisamos las diagonales para saber si es un callejón o una curva.
+                    if self.d_diag_izq < 0.35 and self.d_diag_der < 0.35:
+                        self._cambiar_estado('callejon_giro', 'Callejon detectado. Peonza 180 activada.')
+                        self.tiempo_inicio_giro = ahora
+                    else:
+                        # Uno de los lados está libre, es una curva normal: recalculamos
                         self._iniciar_giro(ahora)
+
+        elif self.estado == 'callejon_giro':
+            # Girar en el sitio matemáticamente (9.5 segundos) para dar la media vuelta
+            if tiempo_girando >= 9.5:
+                self._cambiar_estado('avanzar', 'Media vuelta completada')
 
         elif self.estado == 'escape':
             if d_f > DIST_PARAR_GIRO:
                 self._cambiar_estado('avanzar', 'escape completado')
 
-        # --- APLICACIÓN DE VELOCIDADES ---
+        # --- APLICACIÓN DE VELOCIDADES ORIGINALES ---
         evento = ''
 
         if self.estado == 'pasillo':
@@ -277,33 +252,23 @@ class MazeSolver(Node):
             twist.angular.z = 0.0
             evento = f'pasillo_recto f={d_f:.2f}'
 
-        elif self.estado == 'retroceder':
-            # Marcha atrás limpia y segura
-            if self.d_back > DIST_SEGURIDAD_TRASERA:
-                twist.linear.x = -VEL_RETROCESO
-            else:
-                twist.linear.x = 0.0
-            twist.angular.z = 0.0
-            evento = f'retrocediendo B={self.d_back:.2f}'
-
         elif self.estado == 'escape':
             twist.linear.x  = -0.05
             twist.angular.z = VEL_GIRO
             evento = 'escape'
 
+        elif self.estado == 'callejon_giro':
+            twist.linear.x = 0.0 # Cero avance, gira como una peonza sin atascarse
+            twist.angular.z = VEL_GIRO
+            evento = f'girando_180 t={tiempo_girando:.1f}s'
+
         elif self.estado == 'girar_izq':
-            if self.giro_desde_retroceso:
-                twist.linear.x = 0.0 # Pivotar en el sitio (evita el Tail Swing)
-            else:
-                twist.linear.x  = VEL_AVANCE_GIRO if d_f > 0.22 else 0.0
+            twist.linear.x  = VEL_AVANCE_GIRO if d_f > 0.22 else 0.0
             twist.angular.z = VEL_GIRO
             evento = f'girar_izq arco={twist.linear.x > 0} t={tiempo_girando:.1f}s'
 
         elif self.estado == 'girar_der':
-            if self.giro_desde_retroceso:
-                twist.linear.x = 0.0 # Pivotar en el sitio (evita el Tail Swing)
-            else:
-                twist.linear.x  = VEL_AVANCE_GIRO if d_f > 0.22 else 0.0
+            twist.linear.x  = VEL_AVANCE_GIRO if d_f > 0.22 else 0.0
             twist.angular.z = -VEL_GIRO
             evento = f'girar_der arco={twist.linear.x > 0} t={tiempo_girando:.1f}s'
 
