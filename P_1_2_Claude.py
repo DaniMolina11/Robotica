@@ -15,8 +15,6 @@ DIST_PARAR_GIRO        = 0.32
 DIST_FRENAR            = 0.55   
 DIST_PARED_DERECHA     = 0.25   
 DIST_PASILLO           = 0.45   
-DIST_ESQUINA_CERRADA   = 0.20   
-DIST_SEGURIDAD_TRASERA = 0.15   
 
 VEL_LINEAR_PASILLO    = 0.06
 VEL_LINEAR_NORMAL     = 0.08
@@ -65,7 +63,6 @@ class MazeSolver(Node):
         self.giro_comprometido       = False
         self.ticks_fuera_pasillo     = 0
         
-        # NUEVA VARIABLE: Si el giro dura mucho (callejon), se activa para rotar en el sitio
         self.giro_largo              = False
 
         self.META_X               = 2.75
@@ -189,7 +186,7 @@ class MazeSolver(Node):
         self._cambiar_estado(f'girar_{lado}', f'giro lado={lado}')
         self.tiempo_inicio_giro = ahora
         self.giro_comprometido  = True
-        self.giro_largo         = False # Toda curva empieza siendo normal
+        self.giro_largo         = False 
 
     def control_loop(self):
         twist = Twist()
@@ -215,8 +212,7 @@ class MazeSolver(Node):
         tiempo_girando = ahora - self.tiempo_inicio_giro
         en_pasillo     = (d_r < DIST_PASILLO and d_l < DIST_PASILLO)
 
-        # --- MÁQUINA DE ESTADOS ORIGINAL ---
-        # ¡Ni un solo detector de emergencia ni marcha atrás aquí!
+        # --- MÁQUINA DE ESTADOS ORIGINAL (CERO MARCHAS ATRÁS) ---
         if self.estado == 'pasillo':
             if en_pasillo:
                 self.ticks_fuera_pasillo = 0
@@ -244,12 +240,12 @@ class MazeSolver(Node):
                     self._cambiar_estado('avanzar', f'frente libre d_f={d_f:.2f}')
                     self.giro_largo = False 
                 elif d_f < DIST_PARAR_GIRO - 0.05:
-                    # TRUCO MAESTRO: Si pasa 1.5s y el frente sigue tapado, 
-                    # en lugar de cambiar de lado y chocar, MANTENEMOS la misma curva.
+                    # En un callejón, como el frente sigue bloqueado tras 1.5s, 
+                    # mantenemos el giro de forma continua (U-Turn)
                     self.giro_comprometido = True
                     self.tiempo_inicio_giro = ahora
-                    self.giro_largo = True  # Activamos el modo "rotacion sobre si mismo" para no rozar
-                    self._log_evento('Frente aun bloqueado -> Mantenemos el mismo giro (U-Turn)')
+                    self.giro_largo = True  
+                    self._log_evento('Frente bloqueado tras curva -> Mantenemos el giro (U-Turn)')
 
         elif self.estado == 'escape':
             if d_f > DIST_PARAR_GIRO:
@@ -269,30 +265,46 @@ class MazeSolver(Node):
             
         elif self.estado == 'girar_izq':
             if self.giro_largo:
-                twist.linear.x = 0.0 # Giro en el sitio (180 grados en el callejon)
+                twist.linear.x = 0.0 
             else:
-                twist.linear.x  = VEL_AVANCE_GIRO if d_f > 0.22 else 0.0 # Tu arco normal de curva
+                twist.linear.x  = VEL_AVANCE_GIRO if d_f > 0.22 else 0.0 
             twist.angular.z = VEL_GIRO
             evento = f'girar_izq arco={twist.linear.x>0} t={tiempo_girando:.1f}s'
             
         elif self.estado == 'girar_der':
             if self.giro_largo:
-                twist.linear.x = 0.0 # Giro en el sitio (180 grados en el callejon)
+                twist.linear.x = 0.0 
             else:
-                twist.linear.x  = VEL_AVANCE_GIRO if d_f > 0.22 else 0.0 # Tu arco normal de curva
+                twist.linear.x  = VEL_AVANCE_GIRO if d_f > 0.22 else 0.0 
             twist.angular.z = -VEL_GIRO
             evento = f'girar_der arco={twist.linear.x>0} t={tiempo_girando:.1f}s'
             
         else:  # avanzar
             vel = self.velocidad_frenada(d_f, VEL_LINEAR_NORMAL)
             twist.linear.x = vel
-            if d_r > 1.2:
-                twist.angular.z = -0.20
-                evento = f'buscando_pared vel={vel:.3f}'
-            else:
+            
+            # --- TU IDEA DE ORO: EL CENTRADO DINÁMICO ---
+            umbral_pared = 0.50
+            if d_r < umbral_pared and d_l < umbral_pared:
+                # Vemos ambas paredes: nos centramos a la perfección
+                error = d_l - d_r
+                twist.angular.z = max(min(KP * error, 0.40), -0.40)
+                evento = f'centrando err={error:.3f}'
+            elif d_r < umbral_pared:
+                # Solo hay pared derecha (cruce a la izquierda abierto)
                 error = DIST_PARED_DERECHA - d_r
                 twist.angular.z = max(min(KP * error, 0.40), -0.40)
-                evento = f'siguiendo_pared_der err={error:.3f} vel={vel:.3f}'
+                evento = f'pared_der err={error:.3f}'
+            elif d_l < umbral_pared:
+                # Solo hay pared izquierda (cruce a la derecha abierto)
+                error = d_l - DIST_PARED_DERECHA
+                twist.angular.z = max(min(KP * error, 0.40), -0.40)
+                evento = f'pared_izq err={error:.3f}'
+            else:
+                # Zona totalmente abierta
+                twist.angular.z = 0.0
+                evento = 'zona_abierta'
+
             if vel < VEL_LINEAR_NORMAL:
                 evento += ' FRENANDO'
 
