@@ -9,7 +9,7 @@ import math
 import time
 from collections import deque
 
-# --- PARÁMETROS DE TU CÓDIGO ORIGINAL ---
+# --- PARAMETROS DE TU CODIGO ORIGINAL ---
 DIST_GIRO_PASILLO      = 0.32   
 DIST_PARAR_GIRO        = 0.32
 DIST_FRENAR            = 0.55   
@@ -65,7 +65,7 @@ class MazeSolver(Node):
         self.giro_comprometido       = False
         self.ticks_fuera_pasillo     = 0
         
-        # NUEVA VARIABLE DE CONTROL DE CALLEJÓN
+        # Variable para bloquear oscilaciones al salir del callejon
         self.giro_desde_retroceso    = False
 
         self.META_X               = 2.75
@@ -212,12 +212,11 @@ class MazeSolver(Node):
 
         ahoraStr = time.strftime('%H:%M:%S')
         ahora          = time.time()
-        tiempo_girando = ahora - self.tiempo_inicio_giro
+        tiempo_girando = tracker = ahora - self.tiempo_inicio_giro
         en_pasillo     = (d_r < DIST_PASILLO and d_l < DIST_PASILLO)
 
         # --- REGLA PROTEGIDA EN LÍNEA RECTA ---
         if self.estado in ('avanzar', 'pasillo'):
-            # Ajustado a 0.24 para capturar el callejón con suficiente margen
             callejon_muerto = (d_f <= 0.24 and d_l < 0.30 and d_r < 0.30)
             if callejon_muerto:
                 self._cambiar_estado('retroceder', 'callejon detectado (frente y laterales bloqueados)')
@@ -255,13 +254,12 @@ class MazeSolver(Node):
                 self._iniciar_giro(ahora)
 
         elif self.estado == 'retroceder':
-            # Buscamos la salida del callejón basándonos en datos instantáneos limpios
             if self.d_left > 0.40 or self.d_right > 0.40:
                 lado = 'izq' if self.d_left > self.d_right else 'der'
                 self._cambiar_estado(f'girar_{lado}', f'salida trasera encontrada hacia {lado}')
                 self.tiempo_inicio_giro = ahora
                 self.giro_comprometido  = True
-                self.giro_desde_retroceso = True # PARCHE: Recordamos que venimos del callejón
+                self.giro_desde_retroceso = True # Activamos el bloqueo anti-oscilacion
 
         elif self.estado in ('girar_izq', 'girar_der'):
             if self.giro_comprometido:
@@ -270,11 +268,10 @@ class MazeSolver(Node):
             else:
                 if d_f >= DIST_PARAR_GIRO + 0.10:
                     self._cambiar_estado('avanzar', f'frente libre d_f={d_f:.2f}')
-                    self.giro_desde_retroceso = False # PARCHE: Reseteamos al salir de la curva
+                    self.giro_desde_retroceso = False # Desactivamos al volver al pasillo libre
                 elif d_f < DIST_PARAR_GIRO - 0.05:
+                    # SI VENIMOS DE UN RETROCESO: Prohibido interrumpir el giro o recalcular lados
                     if self.giro_desde_retroceso:
-                        # PARCHE: Si estamos girando para salir del callejón, evitamos 
-                        # reevaluar el lado para no entrar en bucle de tembleque.
                         self.giro_comprometido = True
                         self.tiempo_inicio_giro = ahora
                     else:
@@ -284,7 +281,7 @@ class MazeSolver(Node):
             if d_f > DIST_PARAR_GIRO:
                 self._cambiar_estado('avanzar', 'escape completado')
 
-        # --- APLICACIÓN DE VELOCIDADES ---
+        # --- APLICACIÓN DE VELOCIDADES ORIGINALES ---
         evento = ''
         if self.estado == 'pasillo':
             twist.linear.x  = VEL_LINEAR_PASILLO
@@ -305,8 +302,8 @@ class MazeSolver(Node):
             evento = 'escape'
             
         elif self.estado == 'girar_izq':
+            # Si vienes de retroceder, giro puro en el sitio (0.0) para no comerte la esquina
             if self.giro_desde_retroceso:
-                # PARCHE: Giro en el sitio al salir del callejón
                 twist.linear.x = 0.0
             else:
                 twist.linear.x  = VEL_AVANCE_GIRO if d_f > 0.22 else 0.0
@@ -314,8 +311,8 @@ class MazeSolver(Node):
             evento = f'girar_izq arco={twist.linear.x>0} t={tiempo_girando:.1f}s'
             
         elif self.estado == 'girar_der':
+            # Si vienes de retroceder, giro puro en el sitio (0.0) para no comerte la esquina
             if self.giro_desde_retroceso:
-                # PARCHE: Giro en el sitio al salir del callejón
                 twist.linear.x = 0.0
             else:
                 twist.linear.x  = VEL_AVANCE_GIRO if d_f > 0.22 else 0.0
