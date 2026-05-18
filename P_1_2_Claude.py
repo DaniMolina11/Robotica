@@ -18,7 +18,6 @@ DIST_PASILLO           = 0.45
 
 VEL_LINEAR_PASILLO    = 0.06
 VEL_LINEAR_NORMAL     = 0.08
-VEL_RETROCESO         = 0.05
 VEL_GIRO              = 0.28   
 VEL_AVANCE_GIRO       = 0.06   
 KP                    = 1.2
@@ -62,9 +61,6 @@ class MazeSolver(Node):
         self.tiempo_inicio_giro      = 0.0
         self.giro_comprometido       = False
         self.ticks_fuera_pasillo     = 0
-        
-        # Variable para el giro sobre su eje (solo en callejones)
-        self.giro_largo              = False
 
         self.META_X               = 2.75
         self.META_Y               = 1.71
@@ -117,6 +113,15 @@ class MazeSolver(Node):
 
     def promedio(self, buf):
         return sum(buf) / len(buf) if buf else 3.0
+
+    def reset_filtros(self):
+        self.buf_front.clear()
+        self.buf_right.clear()
+        self.buf_left.clear()
+        self.buf_back.clear()
+        self.buf_diag_izq.clear()
+        self.buf_diag_der.clear()
+        self.lecturas_acumuladas = 0
 
     def velocidad_frenada(self, d_front, vel_max):
         if d_front >= DIST_FRENAR:
@@ -178,7 +183,6 @@ class MazeSolver(Node):
         self._cambiar_estado(f'girar_{lado}', f'giro lado={lado}')
         self.tiempo_inicio_giro = ahora
         self.giro_comprometido  = True
-        self.giro_largo         = False 
 
     def control_loop(self):
         twist = Twist()
@@ -204,7 +208,7 @@ class MazeSolver(Node):
         tiempo_girando = ahora - self.tiempo_inicio_giro
         en_pasillo     = (d_r < DIST_PASILLO and d_l < DIST_PASILLO)
 
-        # --- MÁQUINA DE ESTADOS ORIGINAL (TUYA AL 100%) ---
+        # --- MÁQUINA DE ESTADOS ORIGINAL ---
         if self.estado == 'pasillo':
             if en_pasillo:
                 self.ticks_fuera_pasillo = 0
@@ -230,53 +234,56 @@ class MazeSolver(Node):
             else:
                 if d_f >= DIST_PARAR_GIRO + 0.10:
                     self._cambiar_estado('avanzar', f'frente libre d_f={d_f:.2f}')
-                    self.giro_largo = False 
                 elif d_f < DIST_PARAR_GIRO - 0.05:
-                    # EL GRAN FIX: ¿Estamos realmente encerrados (callejón sin salida)?
+                    # EL TEST DE FUEGO: Ha pasado el tiempo y el frente está tapado. 
+                    # ¿Están también los laterales tapados a menos de 0.35?
                     if self.d_left < 0.35 and self.d_right < 0.35:
-                        # Callejón cerrado: Activamos modo peonza para dar la vuelta 180º
-                        self.giro_comprometido = True
+                        self._cambiar_estado('callejon_giro', 'Atrapado: Iniciando peonza 180')
                         self.tiempo_inicio_giro = ahora
-                        self.giro_largo = True  
-                        self._log_evento('Frente y laterales bloqueados -> Mantenemos giro en el sitio (U-Turn)')
                     else:
-                        # Curva normal cerrada: Recalculamos con tu código original y seguimos avanzando
+                        # Uno de los lados está abierto, así que es una curva normal: aplicamos tu código original
                         self._iniciar_giro(ahora)
+
+        # --- ESTADO AISLADO PARA EL CALLEJÓN ---
+        elif self.estado == 'callejon_giro':
+            # Seguimos girando en el sitio hasta que el frente se abra (pasillo largo)
+            if tiempo_girando > 1.0 and d_f > 0.45:
+                self._cambiar_estado('avanzar', 'Callejón resuelto, avanzando de cara')
 
         elif self.estado == 'escape':
             if d_f > DIST_PARAR_GIRO:
                 self._cambiar_estado('avanzar', 'escape completado')
 
-        # --- APLICACIÓN DE VELOCIDADES ---
+        # --- APLICACIÓN DE VELOCIDADES (TUS ORIGINALES) ---
         evento = ''
+
         if self.estado == 'pasillo':
             twist.linear.x  = VEL_LINEAR_PASILLO
             twist.angular.z = 0.0
             evento = f'pasillo_recto f={d_f:.2f}'
-            
+
         elif self.estado == 'escape':
             twist.linear.x  = -0.05
             twist.angular.z = VEL_GIRO
             evento = 'escape'
-            
+
+        # Velocidades del estado aislado del callejón (peonza pura)
+        elif self.estado == 'callejon_giro':
+            twist.linear.x = 0.0
+            twist.angular.z = VEL_GIRO
+            evento = f'girando_180 f={d_f:.2f}'
+
         elif self.estado == 'girar_izq':
-            if self.giro_largo:
-                twist.linear.x = 0.0 # Giro 180 en el sitio
-            else:
-                twist.linear.x  = VEL_AVANCE_GIRO if d_f > 0.22 else 0.0 
+            twist.linear.x  = VEL_AVANCE_GIRO if d_f > 0.22 else 0.0
             twist.angular.z = VEL_GIRO
             evento = f'girar_izq arco={twist.linear.x>0} t={tiempo_girando:.1f}s'
-            
+
         elif self.estado == 'girar_der':
-            if self.giro_largo:
-                twist.linear.x = 0.0 # Giro 180 en el sitio
-            else:
-                twist.linear.x  = VEL_AVANCE_GIRO if d_f > 0.22 else 0.0 
+            twist.linear.x  = VEL_AVANCE_GIRO if d_f > 0.22 else 0.0
             twist.angular.z = -VEL_GIRO
             evento = f'girar_der arco={twist.linear.x>0} t={tiempo_girando:.1f}s'
-            
-        else:  # avanzar
-            # --- TU SEGUIDOR DE PARED ORIGINAL INTACTO ---
+
+        else:  # avanzar (CON TU TRUCO DE LA PARED DERECHA INTACTO)
             vel = self.velocidad_frenada(d_f, VEL_LINEAR_NORMAL)
             twist.linear.x = vel
             if d_r > 1.2:
