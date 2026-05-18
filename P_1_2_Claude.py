@@ -54,6 +54,10 @@ class MazeSolver(Node):
         self.d_diag_izq = 3.0
         self.d_diag_der = 3.0
 
+        # Sensores puros a 90 grados para no ser engañados por las esquinas
+        self.d_left_90  = 3.0
+        self.d_right_270 = 3.0
+
         self.pos_x = 0.0
         self.pos_y = 0.0
         self.lecturas_acumuladas = 0
@@ -145,6 +149,11 @@ class MazeSolver(Node):
         self.buf_back.append(    self.sector_min(r, 170, 190))
         self.buf_diag_izq.append(self.sector_min(r,  30,  60))
         self.buf_diag_der.append(self.sector_min(r, 300, 330))
+        
+        # Lecturas limpias a 90º exactos para no confundir esquinas con muros laterales
+        self.d_left_90  = self.clean(r[90])
+        self.d_right_270 = self.clean(r[270])
+
         self.lecturas_acumuladas += 1
         self.d_front    = self.promedio(self.buf_front)
         self.d_right    = self.promedio(self.buf_right)
@@ -211,12 +220,17 @@ class MazeSolver(Node):
         tiempo_girando = ahora - self.tiempo_inicio_giro
         en_pasillo     = (d_r < DIST_PASILLO and d_l < DIST_PASILLO)
 
-        # --- MÁQUINA DE ESTADOS 100% TUYA ORIGINAL (LÍNEA RECTA INTACTA) ---
+        # --- MÁQUINA DE ESTADOS ORIGINAL EN LÍNEA RECTA ---
         if self.estado == 'pasillo':
             if en_pasillo:
                 self.ticks_fuera_pasillo = 0
                 if d_f < DIST_GIRO_PASILLO:
-                    self._iniciar_giro(ahora)
+                    # FILTRO EN RECTA: Comprobamos a 90º exactos si los dos lados están tapiados
+                    if self.d_left_90 < 0.35 and self.d_right_270 < 0.35:
+                        self._cambiar_estado('retroceder', 'callejon sin salida detectado en linea recta')
+                        self.reset_filtros()
+                    else:
+                        self._iniciar_giro(ahora) # TUS GIROS ORIGINALES IMPECABLES
             else:
                 self.ticks_fuera_pasillo += 1
                 if self.ticks_fuera_pasillo >= TICKS_CONFIRMACION:
@@ -228,14 +242,20 @@ class MazeSolver(Node):
                 self._cambiar_estado('pasillo', 'pasillo detectado')
                 self.ticks_fuera_pasillo = 0
             elif d_f < DIST_PARAR_GIRO:
-                self._iniciar_giro(ahora)
+                # FILTRO EN RECTA: Comprobamos a 90º exactos si los dos lados están tapiados
+                if self.d_left_90 < 0.35 and self.d_right_270 < 0.35:
+                    self._cambiar_estado('retroceder', 'callejon sin salida detectado en linea recta')
+                    self.reset_filtros()
+                else:
+                    self._iniciar_giro(ahora) # TUS GIROS ORIGINALES IMPECABLES
 
         elif self.estado == 'retroceder':
-            # Marcha atrás recta. Sale al ver hueco lateral (>0.35m) o si el culo roza la pared trasera
+            # Echa marcha atrás recta. Sale al ver hueco lateral (>0.35m) o rozar el culo atrás
             if self.d_left > 0.35 or self.d_right > 0.35 or self.d_back <= DIST_SEGURIDAD_TRASERA:
                 self._iniciar_giro(ahora)
 
         elif self.estado in ('girar_izq', 'girar_der'):
+            # TU CÓDIGO DE GIRO ORIGINAL 100% INTACTO. Cero condiciones de marcha atrás aquí dentro.
             if self.giro_comprometido:
                 if tiempo_girando >= TIEMPO_GIRO_MINIMO:
                     self.giro_comprometido = False
@@ -243,14 +263,7 @@ class MazeSolver(Node):
                 if d_f >= DIST_PARAR_GIRO + 0.10:
                     self._cambiar_estado('avanzar', f'frente libre d_f={d_f:.2f}')
                 elif d_f < DIST_PARAR_GIRO - 0.05:
-                    # EL ESCUDO EXCLUSIVO DE CALLEJÓN: Ha pasado el tiempo y el frente sigue tapado.
-                    # Comprobamos si las dos paredes laterales nos aprisionan (<0.32m)
-                    if self.d_left < 0.32 and self.d_right < 0.32:
-                        self._cambiar_estado('retroceder', 'Callejon sin salida real detectado. Marcha atras.')
-                        self.reset_filtros()
-                    else:
-                        # Si un lado está libre, es una curva normal: recalculamos con tu lógica original
-                        self._iniciar_giro(ahora)
+                    self._iniciar_giro(ahora)
 
         elif self.estado == 'escape':
             if d_f > DIST_PARAR_GIRO:
@@ -268,7 +281,7 @@ class MazeSolver(Node):
                 twist.linear.x = -VEL_RETROCESO
             else:
                 twist.linear.x = 0.0
-            twist.angular.z = 0.0  # Marcha atrás perfectamente recta para no volcar de lado
+            twist.angular.z = 0.0  # Marcha atrás perfectamente recta para no chocar de lado
             evento = f'retrocediendo_recto B={self.d_back:.2f}'
             
         elif self.estado == 'escape':
@@ -286,7 +299,7 @@ class MazeSolver(Node):
             twist.angular.z = -VEL_GIRO
             evento = f'girar_der arco={twist.linear.x>0} t={tiempo_girando:.1f}s'
             
-        else:  # avanzar (TU SEGUIDOR DE PARED DERECHA INTACTO)
+        else:  # avanzar (CON TU TRUCO DE LA PARED DERECHA ORIGINAL)
             vel = self.velocidad_frenada(d_f, VEL_LINEAR_NORMAL)
             twist.linear.x = vel
             if d_r > 1.2:
