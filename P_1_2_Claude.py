@@ -9,27 +9,34 @@ import math
 import time
 from collections import deque
 
-# --- PARÁMETROS DE TU CÓDIGO ORIGINAL ---
-DIST_GIRO_PASILLO      = 0.32   
+# ---------------------------------------------------------------------------
+# PARÁMETROS
+# ---------------------------------------------------------------------------
+DIST_GIRO_PASILLO      = 0.32
 DIST_PARAR_GIRO        = 0.32
-DIST_FRENAR            = 0.55   
-DIST_PARED_DERECHA     = 0.25   
-DIST_PASILLO           = 0.45   
-DIST_ESQUINA_CERRADA   = 0.20   
-DIST_SEGURIDAD_TRASERA = 0.15   
+DIST_FRENAR            = 0.55
+DIST_PARED_DERECHA     = 0.25
+DIST_PASILLO           = 0.45
+DIST_ESQUINA_CERRADA   = 0.20
+DIST_SEGURIDAD_TRASERA = 0.15
 
-VEL_LINEAR_PASILLO    = 0.06
-VEL_LINEAR_NORMAL     = 0.08
-VEL_RETROCESO         = 0.05
-VEL_GIRO              = 0.28   
-VEL_AVANCE_GIRO       = 0.06   
-KP                    = 1.2
+VEL_LINEAR_PASILLO = 0.06
+VEL_LINEAR_NORMAL  = 0.08
+VEL_RETROCESO      = 0.05
+VEL_GIRO           = 0.28
+VEL_AVANCE_GIRO    = 0.06
+KP                 = 1.2
 
-TIEMPO_GIRO_MINIMO    = 1.5
-N_LECTURAS_PROMEDIO   = 5
-TICKS_CONFIRMACION    = 4
+TIEMPO_GIRO_MINIMO  = 1.5
+N_LECTURAS_PROMEDIO = 5
+TICKS_CONFIRMACION  = 4
+
+# Cuántos ciclos de giro comprometido seguidos (cada uno = TIEMPO_GIRO_MINIMO s)
+# toleramos antes de declarar callejón sin salida y activar marcha atrás.
+MAX_GIROS_ENCAJADO = 2
 
 LOG_FILE = '/home/ros/Escriptori/Robotica/maze_log.txt'
+
 
 class MazeSolver(Node):
     def __init__(self):
@@ -61,14 +68,17 @@ class MazeSolver(Node):
         self.estado          = 'esperando'
         self.estado_anterior = 'esperando'
 
-        self.tiempo_inicio_giro      = 0.0
-        self.giro_comprometido       = False
-        self.ticks_fuera_pasillo     = 0
+        self.tiempo_inicio_giro  = 0.0
+        self.giro_comprometido   = False
+        self.ticks_fuera_pasillo = 0
 
-        self.META_X               = 2.75
-        self.META_Y               = 1.71
+        # Cuántos ciclos de giro han terminado sin que el frente se abriera.
+        self.ciclos_giro_fallido = 0
+
+        self.META_X                = 2.75
+        self.META_Y                = 1.71
         self.DISTANCIA_MINIMA_META = 0.25
-        self.meta_alcanzada       = False
+        self.meta_alcanzada        = False
 
         self.sim_time    = 0.0
         self.vel_lin_pub = 0.0
@@ -78,13 +88,18 @@ class MazeSolver(Node):
         self._log_raw('=== INICIO SESION MAZE SOLVER ===')
         self._log_raw(
             f'Params: DIST_GIRO={DIST_GIRO_PASILLO} DIST_PARAR={DIST_PARAR_GIRO} '
-            f'VEL_NORMAL={VEL_LINEAR_NORMAL} VEL_GIRO={VEL_GIRO} VEL_AVANCE_GIRO={VEL_AVANCE_GIRO}'
+            f'VEL_NORMAL={VEL_LINEAR_NORMAL} VEL_GIRO={VEL_GIRO} '
+            f'VEL_AVANCE_GIRO={VEL_AVANCE_GIRO} MAX_GIROS_ENCAJADO={MAX_GIROS_ENCAJADO}'
         )
         self._log_raw(
             'TSIM      | POS_X  | POS_Y  | ESTADO       | '
             'F     | R     | L     | DI    | DD    | VL      | VA      | EVENTO'
         )
         self._log_raw('-' * 130)
+
+    # ------------------------------------------------------------------
+    # Logging
+    # ------------------------------------------------------------------
 
     def _log_raw(self, msg):
         ts = time.strftime('%H:%M:%S')
@@ -107,6 +122,10 @@ class MazeSolver(Node):
             f'F={self.d_front:.2f} R={self.d_right:.2f} L={self.d_left:.2f} '
             f'DI={self.d_diag_izq:.2f} DD={self.d_diag_der:.2f}'
         )
+
+    # ------------------------------------------------------------------
+    # Utilidades
+    # ------------------------------------------------------------------
 
     def clean(self, v):
         return 3.0 if (math.isinf(v) or math.isnan(v)) else float(v)
@@ -133,6 +152,10 @@ class MazeSolver(Node):
             return 0.0
         ratio = (d_front - DIST_PARAR_GIRO) / (DIST_FRENAR - DIST_PARAR_GIRO)
         return round(vel_max * ratio, 3)
+
+    # ------------------------------------------------------------------
+    # Callbacks
+    # ------------------------------------------------------------------
 
     def scan_callback(self, msg):
         r = msg.ranges
@@ -162,6 +185,10 @@ class MazeSolver(Node):
             self.meta_alcanzada = True
             self._log_evento(f'META ALCANZADA dist={dist:.3f}')
 
+    # ------------------------------------------------------------------
+    # Helpers de transición
+    # ------------------------------------------------------------------
+
     def _cambiar_estado(self, nuevo, motivo=''):
         if nuevo != self.estado:
             self._log_evento(f'ESTADO {self.estado} -> {nuevo}  [{motivo}]')
@@ -169,6 +196,7 @@ class MazeSolver(Node):
             self.estado = nuevo
 
     def _decidir_lado_giro(self):
+        """Elige izq/der según el espacio disponible."""
         en_pasillo = (self.d_right < DIST_PASILLO and self.d_left < DIST_PASILLO)
         if en_pasillo:
             lado = 'izq' if self.d_diag_izq >= self.d_diag_der else 'der'
@@ -186,6 +214,17 @@ class MazeSolver(Node):
         self._cambiar_estado(f'girar_{lado}', f'giro lado={lado}')
         self.tiempo_inicio_giro = ahora
         self.giro_comprometido  = True
+
+    def _iniciar_retroceso(self, ahora, motivo=''):
+        """Activa marcha atrás y limpia buffers para respuesta inmediata del láser."""
+        self._cambiar_estado('retroceder', motivo)
+        self.giro_comprometido   = False
+        self.ciclos_giro_fallido = 0
+        self.reset_filtros()
+
+    # ------------------------------------------------------------------
+    # Bucle de control
+    # ------------------------------------------------------------------
 
     def control_loop(self):
         twist = Twist()
@@ -211,12 +250,15 @@ class MazeSolver(Node):
         tiempo_girando = ahora - self.tiempo_inicio_giro
         en_pasillo     = (d_r < DIST_PASILLO and d_l < DIST_PASILLO)
 
-        # --- MÁQUINA DE ESTADOS 100% TUYA ORIGINAL (SIN INTERCEPTORES EN RECTA) ---
+        # ==============================================================
+        # MÁQUINA DE ESTADOS
+        # ==============================================================
+
         if self.estado == 'pasillo':
             if en_pasillo:
                 self.ticks_fuera_pasillo = 0
                 if d_f < DIST_GIRO_PASILLO:
-                    self._iniciar_giro(ahora) # Lanza tus giros impecables directamente
+                    self._iniciar_giro(ahora)
             else:
                 self.ticks_fuera_pasillo += 1
                 if self.ticks_fuera_pasillo >= TICKS_CONFIRMACION:
@@ -228,65 +270,109 @@ class MazeSolver(Node):
                 self._cambiar_estado('pasillo', 'pasillo detectado')
                 self.ticks_fuera_pasillo = 0
             elif d_f < DIST_PARAR_GIRO:
-                self._iniciar_giro(ahora) # Lanza tus giros impecables directamente
+                self._iniciar_giro(ahora)
 
         elif self.estado == 'retroceder':
-            # Retrocede recto. Sale al ver hueco lateral (>0.35m) o si el culo roza la pared trasera
-            if self.d_left > 0.35 or self.d_right > 0.35 or self.d_back <= DIST_SEGURIDAD_TRASERA:
+            # -----------------------------------------------------------
+            # Retrocedemos en línea recta.
+            # Salimos SOLO cuando se abre un hueco lateral >= 0.35 m,
+            # lo que indica que hemos pasado una boca de pasillo lateral
+            # por la que podemos girar.
+            # NO salimos por pared trasera: si tocamos el fondo simplemente
+            # paramos la traslación y esperamos (el hueco acabará apareciendo
+            # cuando el sensor despeje el ángulo lateral).
+            # -----------------------------------------------------------
+            hueco_lateral = (self.d_left > 0.35 or self.d_right > 0.35)
+            if hueco_lateral:
+                self._log_evento(
+                    f'Hueco lateral encontrado al retroceder: '
+                    f'L={self.d_left:.2f} R={self.d_right:.2f}'
+                )
                 self._iniciar_giro(ahora)
 
         elif self.estado in ('girar_izq', 'girar_der'):
             if self.giro_comprometido:
+                # -------------------------------------------------------
+                # Fase comprometida: giramos el tiempo mínimo sin
+                # interrupciones. Al acabar evaluamos el resultado.
+                # -------------------------------------------------------
                 if tiempo_girando >= TIEMPO_GIRO_MINIMO:
                     self.giro_comprometido = False
-            else:
-                if d_f >= DIST_PARAR_GIRO + 0.10:
-                    self._cambiar_estado('avanzar', f'frente libre d_f={d_f:.2f}')
-                elif d_f < DIST_PARAR_GIRO - 0.05:
-                    # LÓGICA SECUENCIAL PEDIDA: Ha intentado girar (1.5s) y el frente sigue tapado.
-                    # Evaluamos si de verdad no hay camino porque las paredes laterales nos encierran:
-                    if self.d_left < 0.35 and self.d_right < 0.35:
-                        self._cambiar_estado('retroceder', 'No hay camino en ningun lado. Activando marcha atras.')
-                        self.reset_filtros()
+
+                    if d_f >= DIST_PARAR_GIRO + 0.10:
+                        # El frente se abrió → avanzar directamente
+                        self.ciclos_giro_fallido = 0
+                        self._cambiar_estado('avanzar', f'giro OK d_f={d_f:.2f}')
                     else:
-                        # Si hay hueco en un lado, es una curva normal: recalculamos con tu lógica original
-                        self._iniciar_giro(ahora)
+                        # Frente sigue cerrado: contamos el fallo
+                        self.ciclos_giro_fallido += 1
+                        self._log_evento(
+                            f'Giro sin resultado #{self.ciclos_giro_fallido} '
+                            f'F={d_f:.2f} L={self.d_left:.2f} R={self.d_right:.2f}'
+                        )
+
+                        if self.ciclos_giro_fallido >= MAX_GIROS_ENCAJADO:
+                            # Callejón sin salida confirmado → marcha atrás
+                            self._log_evento(
+                                f'CALLEJON SIN SALIDA: {self.ciclos_giro_fallido} '
+                                f'giros fallidos → marcha atras'
+                            )
+                            self._iniciar_retroceso(
+                                ahora,
+                                f'callejon confirmado ({self.ciclos_giro_fallido} giros)'
+                            )
+                        else:
+                            # Aún podemos intentar girar al otro lado
+                            self._iniciar_giro(ahora)
+            else:
+                # -------------------------------------------------------
+                # Fase libre (ya pasó el tiempo mínimo y el estado no
+                # cambió arriba): miramos si el frente se abrió.
+                # -------------------------------------------------------
+                if d_f >= DIST_PARAR_GIRO + 0.10:
+                    self.ciclos_giro_fallido = 0
+                    self._cambiar_estado('avanzar', f'frente libre d_f={d_f:.2f}')
 
         elif self.estado == 'escape':
             if d_f > DIST_PARAR_GIRO:
                 self._cambiar_estado('avanzar', 'escape completado')
 
-        # --- APLICACIÓN DE VELOCIDADES ORIGINALES ---
+        # ==============================================================
+        # APLICACIÓN DE VELOCIDADES
+        # ==============================================================
         evento = ''
+
         if self.estado == 'pasillo':
             twist.linear.x  = VEL_LINEAR_PASILLO
             twist.angular.z = 0.0
             evento = f'pasillo_recto f={d_f:.2f}'
-            
+
         elif self.estado == 'retroceder':
+            # Retrocedemos solo si hay espacio detrás; si no, esperamos quietos
             if self.d_back > DIST_SEGURIDAD_TRASERA:
                 twist.linear.x = -VEL_RETROCESO
+                evento = f'retrocediendo B={self.d_back:.2f}'
             else:
                 twist.linear.x = 0.0
-            twist.angular.z = 0.0  # Marcha atrás perfectamente recta
-            evento = f'retrocediendo_recto B={self.d_back:.2f}'
-            
+                evento = f'retroceso_parado_pared_trasera B={self.d_back:.2f}'
+            twist.angular.z = 0.0   # línea recta estricta
+
         elif self.estado == 'escape':
             twist.linear.x  = -0.05
             twist.angular.z = VEL_GIRO
             evento = 'escape'
-            
+
         elif self.estado == 'girar_izq':
             twist.linear.x  = VEL_AVANCE_GIRO if d_f > 0.22 else 0.0
             twist.angular.z = VEL_GIRO
-            evento = f'girar_izq arco={twist.linear.x>0} t={tiempo_girando:.1f}s'
-            
+            evento = f'girar_izq arco={twist.linear.x > 0} t={tiempo_girando:.1f}s'
+
         elif self.estado == 'girar_der':
             twist.linear.x  = VEL_AVANCE_GIRO if d_f > 0.22 else 0.0
             twist.angular.z = -VEL_GIRO
-            evento = f'girar_der arco={twist.linear.x>0} t={tiempo_girando:.1f}s'
-            
-        else:  # avanzar (CON TU SEGUIDOR DE PARED DERECHA INTACTO)
+            evento = f'girar_der arco={twist.linear.x > 0} t={tiempo_girando:.1f}s'
+
+        else:  # avanzar
             vel = self.velocidad_frenada(d_f, VEL_LINEAR_NORMAL)
             twist.linear.x = vel
             if d_r > 1.2:
@@ -311,6 +397,7 @@ class MazeSolver(Node):
         except Exception:
             pass
 
+
 def main(args=None):
     rclpy.init(args=args)
     nodo = MazeSolver()
@@ -324,6 +411,7 @@ def main(args=None):
         nodo.log_file.close()
         nodo.destroy_node()
         rclpy.shutdown()
+
 
 if __name__ == '__main__':
     main()
