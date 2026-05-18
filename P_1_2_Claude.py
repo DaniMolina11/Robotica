@@ -10,7 +10,7 @@ import time
 from collections import deque
 
 # ---------------------------------------------------------------------------
-# PARÁMETROS ORIGINALES
+# PARÁMETROS
 # ---------------------------------------------------------------------------
 DIST_GIRO_PASILLO      = 0.32
 DIST_PARAR_GIRO        = 0.32
@@ -30,8 +30,8 @@ TIEMPO_GIRO_MINIMO  = 1.5
 N_LECTURAS_PROMEDIO = 5
 TICKS_CONFIRMACION  = 4
 
-# --- PARÁMETROS DEL CALLEJÓN ---
-DIST_LATERAL_LIBRE    = 0.38  # lateral >= esto -> hay camino libre
+# --- PARÁMETROS DEL CALLEJÓN SIN SALIDA ---
+DIST_DIAG_LIBRE       = 0.35  # diagonal >= esto → el pasillo se abre (hay camino)
 
 LOG_FILE = '/home/ros/Escriptori/Robotica/maze_log.txt'
 
@@ -209,7 +209,7 @@ class MazeSolver(Node):
     def _iniciar_giro(self, ahora):
         lado = self._decidir_lado_giro()
         self._cambiar_estado(f'girar_{lado}', f'giro lado={lado}')
-        self.tiempo_inicio_giro = ahora
+        self.tiempo_inicio_giro = Woodrow = ahora
         self.giro_comprometido  = True
 
     def _iniciar_retroceso(self, ahora, motivo=''):
@@ -248,16 +248,16 @@ class MazeSolver(Node):
         en_pasillo     = (d_r < DIST_PASILLO and d_l < DIST_PASILLO)
 
         # -------------------------------------------------------------------
-        # MÁQUINA DE ESTADOS (LÓGICA SECUENCIAL ANTES DE GIRAR)
+        # MÁQUINA DE ESTADOS (LÓGICA SECUENCIAL CON DIAGONALES ANTES DE GIRAR)
         # -------------------------------------------------------------------
 
         if self.estado == 'pasillo':
             if en_pasillo:
                 self.ticks_fuera_pasillo = 0
                 if d_f < DIST_GIRO_PASILLO:
-                    # EVALUACIÓN EXCLUSIVA ANTES DE GIRAR
-                    hay_camino_izq = (d_l >= DIST_LATERAL_LIBRE)
-                    hay_camino_der = (d_r >= DIST_LATERAL_LIBRE)
+                    # EVALUACIÓN EXCLUSIVA USANDO LAS DIAGONALES ANTES DE TOCAR VOLANTE
+                    hay_camino_izq = (self.d_diag_izq >= DIST_DIAG_LIBRE)
+                    hay_camino_der = (self.d_diag_der >= DIST_DIAG_LIBRE)
 
                     if not hay_camino_izq and not hay_camino_der:
                         self._iniciar_retroceso(ahora, 'callejon sin salida confirmado en pasillo')
@@ -274,9 +274,9 @@ class MazeSolver(Node):
                 self._cambiar_estado('pasillo', 'pasillo detectado')
                 self.ticks_fuera_pasillo = 0
             elif d_f < DIST_PARAR_GIRO:
-                # EVALUACIÓN EXCLUSIVA ANTES DE GIRAR
-                hay_camino_izq = (d_l >= DIST_LATERAL_LIBRE)
-                hay_camino_der = (d_r >= DIST_LATERAL_LIBRE)
+                # EVALUACIÓN EXCLUSIVA USANDO LAS DIAGONALES ANTES DE TOCAR VOLANTE
+                hay_camino_izq = (self.d_diag_izq >= DIST_DIAG_LIBRE)
+                hay_camino_der = (self.d_diag_der >= DIST_DIAG_LIBRE)
 
                 if not hay_camino_izq and not hay_camino_der:
                     self._iniciar_retroceso(ahora, 'callejon sin salida confirmado en avanzar')
@@ -297,12 +297,11 @@ class MazeSolver(Node):
         elif self.estado == 'retroceder':
             tiempo_retrocediendo = ahora - self.tiempo_inicio_retroceso
 
-            # Sale de la marcha atrás si detecta un pasillo lateral O si el culo roza el fondo por seguridad
-            if d_l >= DIST_LATERAL_LIBRE or d_r >= DIST_LATERAL_LIBRE or self.d_back <= DIST_SEGURIDAD_TRASERA:
+            # Sale de la marcha atrás recta si detecta un pasillo lateral abierto o si roza el fondo por seguridad
+            if self.d_left > 0.35 or self.d_right > 0.35 or self.d_back <= DIST_SEGURIDAD_TRASERA:
                 self._iniciar_giro(ahora)
 
             elif tiempo_retrocediendo >= 4.0:
-                # Timeout de seguridad por si acaso
                 self._iniciar_giro(ahora)
 
         elif self.estado == 'escape':
@@ -326,7 +325,7 @@ class MazeSolver(Node):
             else:
                 twist.linear.x = 0.0
                 evento = f'retroceso_parado_pared_trasera B={self.d_back:.2f}'
-            twist.angular.z = 0.0 # Marcha atrás perfectamente recta para no chocar ni volcar de lado
+            twist.angular.z = 0.0 # Marcha atrás perfectamente recta para no chocar de lado
 
         elif self.estado == 'escape':
             twist.linear.x  = -0.05
