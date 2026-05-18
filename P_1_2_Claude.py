@@ -211,21 +211,12 @@ class MazeSolver(Node):
         tiempo_girando = ahora - self.tiempo_inicio_giro
         en_pasillo     = (d_r < DIST_PASILLO and d_l < DIST_PASILLO)
 
-        # --- MÁQUINA DE ESTADOS ORIGINAL ---
-        # ¡Completamente eliminada la regla externa miedosa que causaba el fallo!
-
+        # --- MÁQUINA DE ESTADOS 100% TUYA ORIGINAL (LÍNEA RECTA INTACTA) ---
         if self.estado == 'pasillo':
             if en_pasillo:
                 self.ticks_fuera_pasillo = 0
                 if d_f < DIST_GIRO_PASILLO:
-                    # TU IDEA: Si ambos lados están cerrados, es un posible callejón.
-                    # Reducimos la distancia a 0.16m para dejarle tiempo de ver si se abre la curva.
-                    if d_l < 0.30 and d_r < 0.30:
-                        if d_f <= 0.16:
-                            self._cambiar_estado('retroceder', 'callejon confirmado de cerca')
-                            self.reset_filtros()
-                    else:
-                        self._iniciar_giro(ahora) # TUS GIROS ORIGINALES INTACTOS
+                    self._iniciar_giro(ahora)
             else:
                 self.ticks_fuera_pasillo += 1
                 if self.ticks_fuera_pasillo >= TICKS_CONFIRMACION:
@@ -234,25 +225,17 @@ class MazeSolver(Node):
 
         elif self.estado == 'avanzar':
             if en_pasillo and d_f >= DIST_GIRO_PASILLO:
-                self._cambiar_estado('pasillo', 'pasillo detectated')
+                self._cambiar_estado('pasillo', 'pasillo detectado')
                 self.ticks_fuera_pasillo = 0
             elif d_f < DIST_PARAR_GIRO:
-                # TU IDEA: Si ambos lados están cerrados, es un posible callejón.
-                # Reducimos la distancia a 0.16m para dejarle tiempo de ver si se abre la curva.
-                if d_l < 0.30 and d_r < 0.30:
-                    if d_f <= 0.16:
-                        self._cambiar_estado('retroceder', 'callejon confirmado de cerca')
-                        self.reset_filtros()
-                else:
-                    self._iniciar_giro(ahora) # TUS GIROS ORIGINALES INTACTOS
+                self._iniciar_giro(ahora)
 
         elif self.estado == 'retroceder':
-            # Retrocede recto. Sale al detectar el pasillo lateral (>0.35m) o si el culo roza la pared trasera
+            # Marcha atrás recta. Sale al ver hueco lateral (>0.35m) o si el culo roza la pared trasera
             if self.d_left > 0.35 or self.d_right > 0.35 or self.d_back <= DIST_SEGURIDAD_TRASERA:
                 self._iniciar_giro(ahora)
 
         elif self.estado in ('girar_izq', 'girar_der'):
-            # TUS GIROS ORIGINALES 100% INTACTOS (Cero marchas atrás añadidas aquí)
             if self.giro_comprometido:
                 if tiempo_girando >= TIEMPO_GIRO_MINIMO:
                     self.giro_comprometido = False
@@ -260,7 +243,14 @@ class MazeSolver(Node):
                 if d_f >= DIST_PARAR_GIRO + 0.10:
                     self._cambiar_estado('avanzar', f'frente libre d_f={d_f:.2f}')
                 elif d_f < DIST_PARAR_GIRO - 0.05:
-                    self._iniciar_giro(ahora)
+                    # EL ESCUDO EXCLUSIVO DE CALLEJÓN: Ha pasado el tiempo y el frente sigue tapado.
+                    # Comprobamos si las dos paredes laterales nos aprisionan (<0.32m)
+                    if self.d_left < 0.32 and self.d_right < 0.32:
+                        self._cambiar_estado('retroceder', 'Callejon sin salida real detectado. Marcha atras.')
+                        self.reset_filtros()
+                    else:
+                        # Si un lado está libre, es una curva normal: recalculamos con tu lógica original
+                        self._iniciar_giro(ahora)
 
         elif self.estado == 'escape':
             if d_f > DIST_PARAR_GIRO:
@@ -278,8 +268,8 @@ class MazeSolver(Node):
                 twist.linear.x = -VEL_RETROCESO
             else:
                 twist.linear.x = 0.0
-            twist.angular.z = 0.0  # Marcha atrás perfectamente recta
-            evento = f'retrocediendo_recto_puro B={self.d_back:.2f}'
+            twist.angular.z = 0.0  # Marcha atrás perfectamente recta para no volcar de lado
+            evento = f'retrocediendo_recto B={self.d_back:.2f}'
             
         elif self.estado == 'escape':
             twist.linear.x  = -0.05
@@ -296,7 +286,7 @@ class MazeSolver(Node):
             twist.angular.z = -VEL_GIRO
             evento = f'girar_der arco={twist.linear.x>0} t={tiempo_girando:.1f}s'
             
-        else:  # avanzar (TUS VELOCIDADES Y SEGUIDOR DE PARED INTACTOS)
+        else:  # avanzar (TU SEGUIDOR DE PARED DERECHA INTACTO)
             vel = self.velocidad_frenada(d_f, VEL_LINEAR_NORMAL)
             twist.linear.x = vel
             if d_r > 1.2:
