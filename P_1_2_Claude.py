@@ -9,27 +9,36 @@ import math
 import time
 from collections import deque
 
-# --- PARÁMETROS DE TU CÓDIGO ORIGINAL ---
-DIST_GIRO_PASILLO      = 0.32   
+# --- PARÁMETROS ORIGINALES ---
+DIST_GIRO_PASILLO      = 0.32
 DIST_PARAR_GIRO        = 0.32
-DIST_FRENAR            = 0.55   
-DIST_PARED_DERECHA     = 0.25   
-DIST_PASILLO           = 0.45   
-DIST_ESQUINA_CERRADA   = 0.20   
-DIST_SEGURIDAD_TRASERA = 0.15   
+DIST_FRENAR            = 0.55
+DIST_PARED_DERECHA     = 0.25
+DIST_PASILLO           = 0.45
+DIST_ESQUINA_CERRADA   = 0.20
+DIST_SEGURIDAD_TRASERA = 0.15
 
 VEL_LINEAR_PASILLO    = 0.06
 VEL_LINEAR_NORMAL     = 0.08
 VEL_RETROCESO         = 0.05
-VEL_GIRO              = 0.28   
-VEL_AVANCE_GIRO       = 0.06   
+VEL_GIRO              = 0.28
+VEL_AVANCE_GIRO       = 0.06
 KP                    = 1.2
 
 TIEMPO_GIRO_MINIMO    = 1.5
 N_LECTURAS_PROMEDIO   = 5
 TICKS_CONFIRMACION    = 4
 
+# --- PARÁMETROS NUEVOS PARA CALLEJÓN SIN SALIDA ---
+# Tiempo máximo retrocediendo antes de buscar salida a la fuerza
+TIEMPO_MAX_RETROCESO  = 3.0
+# Distancia mínima trasera para considerar que hay espacio para seguir retrocediendo
+DIST_RETROCESO_OK     = 0.18
+# Margen lateral mínimo para considerar que hay salida al retroceder
+DIST_SALIDA_LATERAL   = 0.35
+
 LOG_FILE = '/home/ros/Escriptori/Robotica/maze_log.txt'
+
 
 class MazeSolver(Node):
     def __init__(self):
@@ -65,6 +74,11 @@ class MazeSolver(Node):
         self.giro_comprometido       = False
         self.ticks_fuera_pasillo     = 0
 
+        # NUEVO: variables para gestionar el retroceso en callejón sin salida
+        self.tiempo_inicio_retroceso = 0.0
+        self.retroceso_forzado       = False  # True cuando el tiempo de retroceso se agotó
+        self.lado_giro_forzado       = None   # Lado al que giramos por fuerza al agotar tiempo
+
         self.META_X               = 2.75
         self.META_Y               = 1.71
         self.DISTANCIA_MINIMA_META = 0.25
@@ -85,6 +99,10 @@ class MazeSolver(Node):
             'F     | R     | L     | DI    | DD    | VL      | VA      | EVENTO'
         )
         self._log_raw('-' * 130)
+
+    # ------------------------------------------------------------------ #
+    #  Logging                                                             #
+    # ------------------------------------------------------------------ #
 
     def _log_raw(self, msg):
         ts = time.strftime('%H:%M:%S')
@@ -107,6 +125,10 @@ class MazeSolver(Node):
             f'F={self.d_front:.2f} R={self.d_right:.2f} L={self.d_left:.2f} '
             f'DI={self.d_diag_izq:.2f} DD={self.d_diag_der:.2f}'
         )
+
+    # ------------------------------------------------------------------ #
+    #  Utilidades                                                          #
+    # ------------------------------------------------------------------ #
 
     def clean(self, v):
         return 3.0 if (math.isinf(v) or math.isnan(v)) else float(v)
@@ -133,6 +155,10 @@ class MazeSolver(Node):
             return 0.0
         ratio = (d_front - DIST_PARAR_GIRO) / (DIST_FRENAR - DIST_PARAR_GIRO)
         return round(vel_max * ratio, 3)
+
+    # ------------------------------------------------------------------ #
+    #  Callbacks de sensores                                               #
+    # ------------------------------------------------------------------ #
 
     def scan_callback(self, msg):
         r = msg.ranges
@@ -162,6 +188,10 @@ class MazeSolver(Node):
             self.meta_alcanzada = True
             self._log_evento(f'META ALCANZADA dist={dist:.3f}')
 
+    # ------------------------------------------------------------------ #
+    #  Gestión de estados                                                  #
+    # ------------------------------------------------------------------ #
+
     def _cambiar_estado(self, nuevo, motivo=''):
         if nuevo != self.estado:
             self._log_evento(f'ESTADO {self.estado} -> {nuevo}  [{motivo}]')
@@ -187,6 +217,19 @@ class MazeSolver(Node):
         self.tiempo_inicio_giro = ahora
         self.giro_comprometido  = True
 
+    def _iniciar_retroceso(self, ahora, motivo=''):
+        """Centraliza el inicio del estado retroceder para registrar el tiempo."""
+        self._cambiar_estado('retroceder', motivo)
+        self.giro_comprometido       = False
+        self.tiempo_inicio_retroceso = ahora
+        self.retroceso_forzado       = False
+        self.lado_giro_forzado       = None
+        self.reset_filtros()
+
+    # ------------------------------------------------------------------ #
+    #  Bucle de control principal                                          #
+    # ------------------------------------------------------------------ #
+
     def control_loop(self):
         twist = Twist()
 
@@ -207,19 +250,18 @@ class MazeSolver(Node):
         d_r = self.d_right
         d_l = self.d_left
 
-        ahoraStr = time.strftime('%H:%M:%S')
         ahora          = time.time()
         tiempo_girando = ahora - self.tiempo_inicio_giro
+        tiempo_retrocediendo = ahora - self.tiempo_inicio_retroceso
         en_pasillo     = (d_r < DIST_PASILLO and d_l < DIST_PASILLO)
 
-        # --- REGLA PROTEGIDA EN LÍNEA RECTA ---
+        # ----------------------------------------------------------------
+        # REGLA PROTEGIDA: detección de callejón sin salida en línea recta
+        # ----------------------------------------------------------------
         if self.estado in ('avanzar', 'pasillo'):
-            # Ajustado a 0.24 para capturar el callejón con suficiente margen
             callejon_muerto = (d_f <= 0.24 and d_l < 0.30 and d_r < 0.30)
             if callejon_muerto:
-                self._cambiar_estado('retroceder', 'callejon detectado (frente y laterales bloqueados)')
-                self.giro_comprometido = False
-                self.reset_filtros()  # NUEVO: Vaciamos los buffers antiguos para que el láser responda al milisegundo
+                self._iniciar_retroceso(ahora, 'callejon detectado (frente y laterales bloqueados)')
                 return
 
         if self.estado in ('avanzar', 'pasillo'):
@@ -227,12 +269,12 @@ class MazeSolver(Node):
                                d_r < DIST_ESQUINA_CERRADA + 0.05 and
                                d_l < DIST_ESQUINA_CERRADA + 0.05)
             if esquina_cerrada:
-                self._cambiar_estado('retroceder', 'emergencia: esquina cerrada')
-                self.giro_comprometido = False
-                self.reset_filtros()
+                self._iniciar_retroceso(ahora, 'emergencia: esquina cerrada')
                 return
 
-        # --- MÁQUINA DE ESTADOS ---
+        # ----------------------------------------------------------------
+        # MÁQUINA DE ESTADOS
+        # ----------------------------------------------------------------
         if self.estado == 'pasillo':
             if en_pasillo:
                 self.ticks_fuera_pasillo = 0
@@ -252,12 +294,43 @@ class MazeSolver(Node):
                 self._iniciar_giro(ahora)
 
         elif self.estado == 'retroceder':
-            # Buscamos la salida del callejón basándonos en datos instantáneos limpios
-            if self.d_left > 0.40 or self.d_right > 0.40:
+            # -----------------------------------------------------------------
+            # LÓGICA MEJORADA DE RETROCESO EN CALLEJÓN SIN SALIDA
+            # -----------------------------------------------------------------
+            # CASO 1: Encontramos salida lateral mientras retrocedemos (normal)
+            if self.d_left > DIST_SALIDA_LATERAL or self.d_right > DIST_SALIDA_LATERAL:
                 lado = 'izq' if self.d_left > self.d_right else 'der'
+                self._log_evento(f'salida lateral encontrada: lado={lado} L={self.d_left:.2f} R={self.d_right:.2f}')
                 self._cambiar_estado(f'girar_{lado}', f'salida trasera encontrada hacia {lado}')
                 self.tiempo_inicio_giro = ahora
                 self.giro_comprometido  = True
+
+            # CASO 2: Tiempo de retroceso agotado → giramos a la fuerza hacia
+            #         el lado con más espacio y esperamos salir del callejón
+            elif tiempo_retrocediendo >= TIEMPO_MAX_RETROCESO:
+                if not self.retroceso_forzado:
+                    self.retroceso_forzado  = True
+                    # Elegimos el lado con más espacio (aunque sea poco)
+                    self.lado_giro_forzado  = 'izq' if self.d_left >= self.d_right else 'der'
+                    self._log_evento(
+                        f'RETROCESO TIMEOUT → giro forzado hacia {self.lado_giro_forzado} '
+                        f'L={self.d_left:.2f} R={self.d_right:.2f} B={self.d_back:.2f}'
+                    )
+                    self._cambiar_estado(
+                        f'girar_{self.lado_giro_forzado}',
+                        f'timeout retroceso, giro forzado {self.lado_giro_forzado}'
+                    )
+                    self.tiempo_inicio_giro = ahora
+                    self.giro_comprometido  = True
+
+            # CASO 3: Pared trasera muy cerca → paramos el retroceso pero seguimos buscando
+            elif self.d_back <= DIST_RETROCESO_OK:
+                self._log_evento(
+                    f'PARED TRASERA CERCA B={self.d_back:.2f}, esperando salida lateral '
+                    f'L={self.d_left:.2f} R={self.d_right:.2f}'
+                )
+                # No avanzamos ni retrocedemos; en el bloque de velocidades
+                # se aplicará twist=0 hasta que una de las condiciones anteriores se cumpla.
 
         elif self.estado in ('girar_izq', 'girar_der'):
             if self.giro_comprometido:
@@ -273,38 +346,41 @@ class MazeSolver(Node):
             if d_f > DIST_PARAR_GIRO:
                 self._cambiar_estado('avanzar', 'escape completado')
 
-        # --- APLICACIÓN DE VELOCIDADES ---
+        # ----------------------------------------------------------------
+        # APLICACIÓN DE VELOCIDADES
+        # ----------------------------------------------------------------
         evento = ''
+
         if self.estado == 'pasillo':
             twist.linear.x  = VEL_LINEAR_PASILLO
             twist.angular.z = 0.0
             evento = f'pasillo_recto f={d_f:.2f}'
-            
+
         elif self.estado == 'retroceder':
-            if self.d_back > DIST_SEGURIDAD_TRASERA:
+            # Retrocedemos solo si hay espacio detrás; si no, esperamos quietos
+            if self.d_back > DIST_RETROCESO_OK:
                 twist.linear.x = -VEL_RETROCESO
+                evento = f'retrocediendo B={self.d_back:.2f} t={tiempo_retrocediendo:.1f}s'
             else:
                 twist.linear.x = 0.0
-            # NUEVO: Bloqueamos el giro angular a 0.0 de forma estricta.
-            # Al no balancear las ruedas de lado a lado con retardos, el robot clava una línea recta perfecta.
-            twist.angular.z = 0.0  
-            evento = f'retrocediendo_recto_puro B={self.d_back:.2f}'
-            
+                evento = f'retroceso_parado_pared_trasera B={self.d_back:.2f}'
+            twist.angular.z = 0.0   # sin giro para retroceder en línea recta
+
         elif self.estado == 'escape':
             twist.linear.x  = -0.05
             twist.angular.z = VEL_GIRO
             evento = 'escape'
-            
+
         elif self.estado == 'girar_izq':
             twist.linear.x  = VEL_AVANCE_GIRO if d_f > 0.22 else 0.0
             twist.angular.z = VEL_GIRO
-            evento = f'girar_izq arco={twist.linear.x>0} t={tiempo_girando:.1f}s'
-            
+            evento = f'girar_izq arco={twist.linear.x > 0} t={tiempo_girando:.1f}s'
+
         elif self.estado == 'girar_der':
             twist.linear.x  = VEL_AVANCE_GIRO if d_f > 0.22 else 0.0
             twist.angular.z = -VEL_GIRO
-            evento = f'girar_der arco={twist.linear.x>0} t={tiempo_girando:.1f}s'
-            
+            evento = f'girar_der arco={twist.linear.x > 0} t={tiempo_girando:.1f}s'
+
         else:  # avanzar
             vel = self.velocidad_frenada(d_f, VEL_LINEAR_NORMAL)
             twist.linear.x = vel
@@ -330,6 +406,7 @@ class MazeSolver(Node):
         except Exception:
             pass
 
+
 def main(args=None):
     rclpy.init(args=args)
     nodo = MazeSolver()
@@ -343,6 +420,7 @@ def main(args=None):
         nodo.log_file.close()
         nodo.destroy_node()
         rclpy.shutdown()
+
 
 if __name__ == '__main__':
     main()
