@@ -9,7 +9,7 @@ import math
 import time
 from collections import deque
 
-# --- PARAMETROS ORIGINALES ---
+# --- PARAMETROS ORIGINALES (CONSERVADOS AL 100%) ---
 DIST_GIRO_PASILLO      = 0.32
 DIST_PARAR_GIRO        = 0.32
 DIST_FRENAR            = 0.55
@@ -29,7 +29,7 @@ TIEMPO_GIRO_MINIMO    = 1.5
 N_LECTURAS_PROMEDIO   = 5
 TICKS_CONFIRMACION    = 4
 
-# --- PARAMETROS DE RESPALDO ---
+# --- PARAMETROS DE RESPALDO PARA EL RETROCESO ---
 TIEMPO_MAX_RETROCESO  = 3.0
 DIST_RETROCESO_OK     = 0.18
 DIST_SALIDA_LATERAL   = 0.35
@@ -231,7 +231,7 @@ class MazeSolver(Node):
         en_pasillo     = (d_r < DIST_PASILLO and d_l < DIST_PASILLO)
 
         # ----------------------------------------------------------------
-        # REGLAS DE SEGURIDAD PROTEGIDAS ORIGINALES (RESTAURADAS AL 100%)
+        # TUS REGLAS DE SEGURIDAD PROTEGIDAS ORIGINALES (CONSERVADAS)
         # ----------------------------------------------------------------
         if self.estado in ('avanzar', 'pasillo'):
             callejon_muerto = (d_f <= 0.24 and d_l < 0.30 and d_r < 0.30)
@@ -248,7 +248,7 @@ class MazeSolver(Node):
                 return
 
         # ----------------------------------------------------------------
-        # MAQUINA DE ESTADOS ORIGINAL (CONSERVADA AL 100%)
+        # TÚ MÁQUINA DE ESTADOS ORIGINAL (CONSERVADA AL 100%)
         # ----------------------------------------------------------------
         if self.estado == 'pasillo':
             if en_pasillo:
@@ -294,22 +294,14 @@ class MazeSolver(Node):
                 if d_f >= DIST_PARAR_GIRO + 0.10:
                     self._cambiar_estado('avanzar', f'frente libre d_f={d_f:.2f}')
                 elif d_f < DIST_PARAR_GIRO - 0.05:
-                    # --- FILTRO QUIRURGICO PARA EL CALLEJON ---
-                    # Si ambos laterales estan encajonados, es un callejon: mantenemos el giro actual.
-                    # Si un lado esta abierto, es una curva normal: usamos tu reevaluacion original.
-                    if d_l < 0.28 and d_r < 0.28:
-                        self.giro_comprometido = True
-                        self.tiempo_inicio_giro = ahora
-                        self._log_evento(f'Callejon detectado en giro: manteniendo {self.estado}')
-                    else:
-                        self._iniciar_giro(ahora)
+                    self._iniciar_giro(ahora)
 
         elif self.estado == 'escape':
             if d_f > DIST_PARAR_GIRO:
                 self._cambiar_estado('avanzar', 'escape completado')
 
         # ----------------------------------------------------------------
-        # APLICACION DE VELOCIDADES ORIGINALES (100% INTACTAS)
+        # TUS VELOCIDADES ORIGINALES CON EL PARCHE DE ESCAPE QUIRÚRGICO
         # ----------------------------------------------------------------
         evento = ''
 
@@ -333,12 +325,22 @@ class MazeSolver(Node):
             evento = 'escape'
 
         elif self.estado == 'girar_izq':
-            twist.linear.x  = VEL_AVANCE_GIRO if d_f > 0.22 else 0.0
+            # PARCHE DEFINITIVO: Si acabas de dar marcha atras, gira sobre tu eje sin avanzar
+            if self.estado_anterior == 'retroceder':
+                twist.linear.x = 0.0
+            else:
+                twist.linear.x  = VEL_AVANCE_GIRO if d_f > 0.22 else 0.0
+                
             twist.angular.z = VEL_GIRO
             evento = f'girar_izq arco={twist.linear.x > 0} t={tiempo_girando:.1f}s'
 
         elif self.estado == 'girar_der':
-            twist.linear.x  = VEL_AVANCE_GIRO if d_f > 0.22 else 0.0
+            # PARCHE DEFINITIVO: Si acabas de dar marcha atras, gira sobre tu eje sin avanzar
+            if self.estado_anterior == 'retroceder':
+                twist.linear.x = 0.0
+            else:
+                twist.linear.x  = VEL_AVANCE_GIRO if d_f > 0.22 else 0.0
+                
             twist.angular.z = -VEL_GIRO
             evento = f'girar_der arco={twist.linear.x > 0} t={tiempo_girando:.1f}s'
 
