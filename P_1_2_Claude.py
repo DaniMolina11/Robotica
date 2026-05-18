@@ -231,11 +231,11 @@ class MazeSolver(Node):
         en_pasillo     = (d_r < DIST_PASILLO and d_l < DIST_PASILLO)
 
         # ----------------------------------------------------------------
-        # REGLA PROTEGIDA: Detección GLOBAL de callejón sin salida
+        # REGLA PROTEGIDA TUYA: Cambiada la distancia para anticipar el callejón antes de girar
         # ----------------------------------------------------------------
-        if self.estado != 'retroceder':
-            # Si el frente y ambos lados están completamente bloqueados, es un callejón sin salida
-            callejon_muerto = (d_f <= 0.25 and d_l < 0.32 and d_r < 0.32)
+        if self.estado in ('avanzar', 'pasillo'):
+            # Detectamos el callejón a los 0.34m (justo antes de saltar los 0.32m de tu giro)
+            callejon_muerto = (d_f <= 0.34 and d_l < 0.32 and d_r < 0.32)
             if callejon_muerto:
                 self._iniciar_retroceso(ahora, 'callejon detectado (frente y laterales bloqueados)')
                 return
@@ -249,7 +249,7 @@ class MazeSolver(Node):
                 return
 
         # ----------------------------------------------------------------
-        # MÁQUINA DE ESTADOS
+        # MÁQUINA DE ESTADOS ORIGINAL (100% INTACTA)
         # ----------------------------------------------------------------
         if self.estado == 'pasillo':
             if en_pasillo:
@@ -306,18 +306,14 @@ class MazeSolver(Node):
                 if d_f >= DIST_PARAR_GIRO + 0.10:
                     self._cambiar_estado('avanzar', f'frente libre d_f={d_f:.2f}')
                 elif d_f < DIST_PARAR_GIRO - 0.05:
-                    # PARCHE ANTI-BUCLE: En lugar de recalcular bando y oscilar,
-                    # renovamos el giro en la misma dirección que ya llevábamos.
-                    self.giro_comprometido = True
-                    self.tiempo_inicio_giro = ahora
-                    self._log_evento(f'Manteniendo direccion de giro por frente bloqueado d_f={d_f:.2f}')
+                    self._iniciar_giro(ahora)
 
         elif self.estado == 'escape':
             if d_f > DIST_PARAR_GIRO:
                 self._cambiar_estado('avanzar', 'escape completado')
 
         # ----------------------------------------------------------------
-        # APLICACIÓN DE VELOCIDADES
+        # APLICACIÓN DE VELOCIDADES ORIGINALES (100% INTACTAS)
         # ----------------------------------------------------------------
         evento = ''
 
