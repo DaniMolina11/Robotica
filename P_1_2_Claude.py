@@ -9,7 +9,7 @@ import math
 import time
 from collections import deque
 
-# --- PARÁMETROS ORIGINALES ---
+# --- PARÁMETROS ORIGINALES (CONSERVADOS) ---
 DIST_GIRO_PASILLO      = 0.32
 DIST_PARAR_GIRO        = 0.32
 DIST_FRENAR            = 0.55
@@ -29,7 +29,7 @@ TIEMPO_GIRO_MINIMO    = 1.5
 N_LECTURAS_PROMEDIO   = 5
 TICKS_CONFIRMACION    = 4
 
-# --- PARÁMETROS NUEVOS PARA CALLEJÓN SIN SALIDA ---
+# --- PARÁMETROS PARA CALLEJÓN SIN SALIDA REAL ---
 TIEMPO_MAX_RETROCESO  = 3.0
 DIST_RETROCESO_OK     = 0.18
 DIST_SALIDA_LATERAL   = 0.35
@@ -231,22 +231,9 @@ class MazeSolver(Node):
         en_pasillo     = (d_r < DIST_PASILLO and d_l < DIST_PASILLO)
 
         # ----------------------------------------------------------------
-        # REGLA PROTEGIDA TUYA: Cambiada la distancia para anticipar el callejón antes de girar
+        # ELIMINADAS COMPLETAMENTE LAS INTERRUPCIONES DURANTE EL AVANCE 
+        # (El robot ya no dará frenazos ni retrocederá al aproximarse a curvas)
         # ----------------------------------------------------------------
-        if self.estado in ('avanzar', 'pasillo'):
-            # Detectamos el callejón a los 0.34m (justo antes de saltar los 0.32m de tu giro)
-            callejon_muerto = (d_f <= 0.34 and d_l < 0.32 and d_r < 0.32)
-            if callejon_muerto:
-                self._iniciar_retroceso(ahora, 'callejon detectado (frente y laterales bloqueados)')
-                return
-
-        if self.estado in ('avanzar', 'pasillo'):
-            esquina_cerrada = (d_f < DIST_ESQUINA_CERRADA and
-                               d_r < DIST_ESQUINA_CERRADA + 0.05 and
-                               d_l < DIST_ESQUINA_CERRADA + 0.05)
-            if esquina_cerrada:
-                self._iniciar_retroceso(ahora, 'emergencia: esquina cerrada')
-                return
 
         # ----------------------------------------------------------------
         # MÁQUINA DE ESTADOS ORIGINAL (100% INTACTA)
@@ -306,7 +293,14 @@ class MazeSolver(Node):
                 if d_f >= DIST_PARAR_GIRO + 0.10:
                     self._cambiar_estado('avanzar', f'frente libre d_f={d_f:.2f}')
                 elif d_f < DIST_PARAR_GIRO - 0.05:
-                    self._iniciar_giro(ahora)
+                    # --- ÚNICO DETECTOR DE CALLEJÓN SEGURO ---
+                    # Si ha pasado el tiempo mínimo de giro y el frente SIGUE bloqueado,
+                    # comprobamos si es que estamos encajonados en un callejón (ambos lados < 0.26m)
+                    if d_l < 0.26 and d_r < 0.26:
+                        self._iniciar_retroceso(ahora, 'callejon sin salida real detectado tras intentar girar')
+                        return
+                    else:
+                        self._iniciar_giro(ahora)
 
         elif self.estado == 'escape':
             if d_f > DIST_PARAR_GIRO:
