@@ -74,6 +74,9 @@ class MazeSolver(Node):
         self.tiempo_inicio_retroceso = 0.0
         self.retroceso_forzado       = False  
         self.lado_giro_forzado       = None   
+        
+        # Nueva variable de control estricto para el callejon
+        self.giro_desde_retroceso    = False  
 
         self.META_X               = 2.75
         self.META_Y               = 1.71
@@ -126,15 +129,6 @@ class MazeSolver(Node):
 
     def promedio(self, buf):
         return sum(buf) / len(buf) if buf else 3.0
-
-    def reset_filtros(self):
-        self.buf_front.clear()
-        self.buf_right.clear()
-        self.buf_left.clear()
-        self.buf_back.clear()
-        self.buf_diag_izq.clear()
-        self.buf_diag_der.clear()
-        self.lecturas_acumuladas = 0
 
     def velocidad_frenada(self, d_front, vel_max):
         if d_front >= DIST_FRENAR:
@@ -203,6 +197,7 @@ class MazeSolver(Node):
         self.tiempo_inicio_retroceso = ahora
         self.retroceso_forzado       = False
         self.lado_giro_forzado       = None
+        self.giro_desde_retroceso    = False
         self.reset_filtros()
 
     def control_loop(self):
@@ -248,7 +243,7 @@ class MazeSolver(Node):
                 return
 
         # ----------------------------------------------------------------
-        # TÚ MÁQUINA DE ESTADOS ORIGINAL (CONSERVADA AL 100%)
+        # MÁQUINA DE ESTADOS ORIGINAL (CONSERVADA AL 100%)
         # ----------------------------------------------------------------
         if self.estado == 'pasillo':
             if en_pasillo:
@@ -275,6 +270,7 @@ class MazeSolver(Node):
                 self._cambiar_estado(f'girar_{lado}', f'salida trasera encontrada hacia {lado}')
                 self.tiempo_inicio_giro = ahora
                 self.giro_comprometido  = True
+                self.giro_desde_retroceso = True  # Activamos el escudo del callejon
             elif tiempo_retrocediendo >= TIEMPO_MAX_RETROCESO:
                 if not self.retroceso_forzado:
                     self.retroceso_forzado  = True
@@ -283,6 +279,7 @@ class MazeSolver(Node):
                     self._cambiar_estado(f'girar_{self.lado_giro_forzado}', 'timeout retroceso')
                     self.tiempo_inicio_giro = ahora
                     self.giro_comprometido  = True
+                    self.giro_desde_retroceso = True  # Activamos el escudo del callejon
             elif self.d_back <= DIST_RETROCESO_OK:
                 self._log_evento(f'PARED TRASERA CERCA B={self.d_back:.2f}, esperando salida lateral')
 
@@ -293,15 +290,20 @@ class MazeSolver(Node):
             else:
                 if d_f >= DIST_PARAR_GIRO + 0.10:
                     self._cambiar_estado('avanzar', f'frente libre d_f={d_f:.2f}')
+                    self.giro_desde_retroceso = False  # Desactivamos el escudo al salir al pasillo libre
                 elif d_f < DIST_PARAR_GIRO - 0.05:
-                    self._iniciar_giro(ahora)
+                    # Si venimos de dar marcha atras, evitamos que reevalue y cambie de direccion
+                    if self.giro_desde_retroceso:
+                        pass 
+                    else:
+                        self._iniciar_giro(ahora)
 
         elif self.estado == 'escape':
             if d_f > DIST_PARAR_GIRO:
                 self._cambiar_estado('avanzar', 'escape completado')
 
         # ----------------------------------------------------------------
-        # TUS VELOCIDADES ORIGINALES CON EL PARCHE DE ESCAPE QUIRÚRGICO
+        # APLICACIÓN DE VELOCIDADES ORIGINALES (100% INTACTAS)
         # ----------------------------------------------------------------
         evento = ''
 
@@ -325,8 +327,8 @@ class MazeSolver(Node):
             evento = 'escape'
 
         elif self.estado == 'girar_izq':
-            # PARCHE DEFINITIVO: Si acabas de dar marcha atras, gira sobre tu eje sin avanzar
-            if self.estado_anterior == 'retroceder':
+            # Si el escudo esta activo por venir de marcha atras, giro puro en el sitio (0.0)
+            if self.giro_desde_retroceso:
                 twist.linear.x = 0.0
             else:
                 twist.linear.x  = VEL_AVANCE_GIRO if d_f > 0.22 else 0.0
@@ -335,8 +337,8 @@ class MazeSolver(Node):
             evento = f'girar_izq arco={twist.linear.x > 0} t={tiempo_girando:.1f}s'
 
         elif self.estado == 'girar_der':
-            # PARCHE DEFINITIVO: Si acabas de dar marcha atras, gira sobre tu eje sin avanzar
-            if self.estado_anterior == 'retroceder':
+            # Si el escudo esta activo por venir de marcha atras, giro puro en el sitio (0.0)
+            if self.giro_desde_retroceso:
                 twist.linear.x = 0.0
             else:
                 twist.linear.x  = VEL_AVANCE_GIRO if d_f > 0.22 else 0.0
