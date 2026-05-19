@@ -252,42 +252,22 @@ class MazeSolver(Node):
                 self._iniciar_giro(ahora)
 
         elif self.estado == 'retroceder':
-            # Realizar un giro de 180 grados si se detecta un callejón sin salida
-            if not self.giro_comprometido:
-                self._cambiar_estado('girar_izq', 'iniciando giro 180 grados desde retroceso')
+            # Buscamos la salida del callejón basándonos en datos instantáneos limpios
+            if self.d_left > 0.40 or self.d_right > 0.40:
+                lado = 'izq' if self.d_left > self.d_right else 'der'
+                self._cambiar_estado(f'girar_{lado}', f'salida trasera encontrada hacia {lado}')
                 self.tiempo_inicio_giro = ahora
-                self.giro_comprometido = True
-            elif tiempo_girando >= TIEMPO_GIRO_MINIMO * 2:  # Asegurar giro completo
-                self._cambiar_estado('avanzar', 'giro 180 grados completado')
-                self.giro_comprometido = False
-            else:
-                # Mantener el giro angular constante durante el giro
-                twist.linear.x = 0.0
-                twist.angular.z = VEL_GIRO if self.estado == 'girar_izq' else -VEL_GIRO
+                self.giro_comprometido  = True
 
         elif self.estado in ('girar_izq', 'girar_der'):
             if self.giro_comprometido:
-                # Verificar si el giro ha alcanzado el tiempo mínimo
                 if tiempo_girando >= TIEMPO_GIRO_MINIMO:
                     self.giro_comprometido = False
-                    self._cambiar_estado('estabilizar', 'completado giro, estabilizando')
-                else:
-                    # Mantener giro angular constante
-                    twist.linear.x = 0.0
-                    twist.angular.z = VEL_GIRO if self.estado == 'girar_izq' else -VEL_GIRO
             else:
                 if d_f >= DIST_PARAR_GIRO + 0.10:
                     self._cambiar_estado('avanzar', f'frente libre d_f={d_f:.2f}')
                 elif d_f < DIST_PARAR_GIRO - 0.05:
                     self._iniciar_giro(ahora)
-
-        elif self.estado == 'estabilizar':
-            # Avanzar en línea recta durante un tiempo mínimo para evitar zigzag
-            if tiempo_girando >= 0.5:  # Tiempo de estabilización
-                self._cambiar_estado('avanzar', 'estabilización completada')
-            else:
-                twist.linear.x = VEL_LINEAR_NORMAL
-                twist.angular.z = 0.0
 
         elif self.estado == 'escape':
             if d_f > DIST_PARAR_GIRO:
