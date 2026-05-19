@@ -252,12 +252,14 @@ class MazeSolver(Node):
                 self._iniciar_giro(ahora)
 
         elif self.estado == 'retroceder':
-            # Buscamos la salida del callejón basándonos en datos instantáneos limpios
-            if self.d_left > 0.40 or self.d_right > 0.40:
-                lado = 'izq' if self.d_left > self.d_right else 'der'
-                self._cambiar_estado(f'girar_{lado}', f'salida trasera encontrada hacia {lado}')
+            # Realizar un giro de 180 grados si se detecta un callejón sin salida
+            if not self.giro_comprometido:
+                self._cambiar_estado('girar_izq', 'giro 180 grados desde retroceso')
                 self.tiempo_inicio_giro = ahora
-                self.giro_comprometido  = True
+                self.giro_comprometido = True
+            elif tiempo_girando >= TIEMPO_GIRO_MINIMO * 2:  # Asegurar giro completo
+                self._cambiar_estado('avanzar', 'giro 180 grados completado')
+                self.giro_comprometido = False
 
         elif self.estado in ('girar_izq', 'girar_der'):
             if self.giro_comprometido:
