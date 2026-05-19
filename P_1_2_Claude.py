@@ -17,16 +17,19 @@ DIST_PARED_DERECHA     = 0.25
 DIST_PASILLO           = 0.45
 DIST_SEGURIDAD_TRASERA = 0.15
 TICKS_CONFIRMAR_CALLEJON = 6   
-TIEMPO_GIRO_180        = 3.5    # Ajusta este valor si gira de más o de menos
+TIEMPO_GIRO_180        = 3.5    # Tiempo que tarda en girar 180 grados (ajustable)
 
 VEL_LINEAR_PASILLO = 0.06
 VEL_LINEAR_NORMAL  = 0.08
+VEL_RETROCESO      = 0.05
 VEL_GIRO           = 0.28
 VEL_AVANCE_GIRO    = 0.06
 KP                 = 1.2
 
 TIEMPO_GIRO_MINIMO  = 1.5
 N_LECTURAS_PROMEDIO = 5
+TICKS_CONFIRMACION  = 4
+
 LOG_FILE = '/home/ros/Escriptori/Robotica/maze_log.txt'
 
 class MazeSolver(Node):
@@ -38,15 +41,26 @@ class MazeSolver(Node):
         self.odom_sub = self.create_subscription(Odometry,  '/odom', self.odom_callback, 10)
         self.timer    = self.create_timer(0.1, self.control_loop)
 
-        self.buf_front = deque(maxlen=N_LECTURAS_PROMEDIO)
-        self.buf_right = deque(maxlen=N_LECTURAS_PROMEDIO)
-        self.buf_left  = deque(maxlen=N_LECTURAS_PROMEDIO)
-        self.buf_back  = deque(maxlen=N_LECTURAS_PROMEDIO)
+        self.buf_front    = deque(maxlen=N_LECTURAS_PROMEDIO)
+        self.buf_right    = deque(maxlen=N_LECTURAS_PROMEDIO)
+        self.buf_left     = deque(maxlen=N_LECTURAS_PROMEDIO)
+        self.buf_back     = deque(maxlen=N_LECTURAS_PROMEDIO)
+        self.buf_diag_izq = deque(maxlen=N_LECTURAS_PROMEDIO)
+        self.buf_diag_der = deque(maxlen=N_LECTURAS_PROMEDIO)
 
-        self.d_front = self.d_right = self.d_left = self.d_back = 3.0
+        self.d_front    = 3.0
+        self.d_right    = 3.0
+        self.d_left     = 3.0
+        self.d_back     = 3.0
+        self.d_diag_izq = 3.0
+        self.d_diag_der = 3.0
+
+        self.pos_x = 0.0
+        self.pos_y = 0.0
         self.lecturas_acumuladas = 0
-        self.estado              = 'esperando'
+        self.estado          = 'esperando'
         self.tiempo_inicio_giro  = 0.0
+        self.giro_comprometido   = False
         self.ticks_callejon      = 0 
 
         self.log_file = open(LOG_FILE, 'w')
@@ -73,20 +87,31 @@ class MazeSolver(Node):
         self.buf_right.append(min(r[260:310]))
         self.buf_left.append(min(r[50:110]))
         self.buf_back.append(min(r[170:190]))
+        self.buf_diag_izq.append(min(r[30:60]))
+        self.buf_diag_der.append(min(r[300:330]))
         
         self.lecturas_acumuladas += 1
-        self.d_front = self.promedio(self.buf_front)
-        self.d_right = self.promedio(self.buf_right)
-        self.d_left  = self.promedio(self.buf_left)
-        self.d_back  = self.promedio(self.buf_back)
+        self.d_front    = self.promedio(self.buf_front)
+        self.d_right    = self.promedio(self.buf_right)
+        self.d_left     = self.promedio(self.buf_left)
+        self.d_back     = self.promedio(self.buf_back)
+        self.d_diag_izq = self.promedio(self.buf_diag_izq)
+        self.d_diag_der = self.promedio(self.buf_diag_der)
 
     def odom_callback(self, msg):
-        pass
+        self.pos_x = msg.pose.pose.position.x
+        self.pos_y = msg.pose.pose.position.y
 
     def _cambiar_estado(self, nuevo):
         if nuevo != self.estado:
             self._log_raw(f'>>> CAMBIO ESTADO: {self.estado} -> {nuevo}')
             self.estado = nuevo
+
+    def _iniciar_giro(self, ahora):
+        lado = 'izq' if self.d_diag_izq >= self.d_diag_der else 'der'
+        self._cambiar_estado(f'girar_{lado}')
+        self.tiempo_inicio_giro = ahora
+        self.giro_comprometido = True
 
     def control_loop(self):
         twist = Twist()
@@ -96,7 +121,8 @@ class MazeSolver(Node):
 
         ahora = time.time()
         
-        # 1. DETECCIÓN DE CALLEJÓN (Ignorado si ya está girando)
+        # --- DETECCIÓN DE CALLEJÓN ---
+        # Si está bloqueado, activa giro 180 en lugar de retroceder
         if self.estado in ('avanzar', 'pasillo'):
             if self.d_front <= 0.25 and self.d_left < 0.35 and self.d_right < 0.35:
                 self.ticks_callejon += 1
@@ -108,29 +134,30 @@ class MazeSolver(Node):
         else:
             self.ticks_callejon = 0 
 
-        # 2. MÁQUINA DE ESTADOS
+        # --- MÁQUINA DE ESTADOS ---
         if self.estado == 'esperando': self._cambiar_estado('avanzar')
 
         elif self.estado == 'avanzar':
             if self.d_front < DIST_PARAR_GIRO:
-                lado = 'izq' if self.d_left >= self.d_right else 'der'
-                self._cambiar_estado(f'girar_{lado}')
-                self.tiempo_inicio_giro = ahora
+                self._iniciar_giro(ahora)
 
-        elif self.estado in ('girar_izq', 'girar_der'):
-            if (ahora - self.tiempo_inicio_giro) > TIEMPO_GIRO_MINIMO:
-                if self.d_front >= DIST_PARAR_GIRO + 0.10:
-                    self._cambiar_estado('avanzar')
-        
         elif self.estado == 'girar_180':
-            # Termina el giro tras el tiempo definido
             if (ahora - self.tiempo_inicio_giro) > TIEMPO_GIRO_180:
                 self._cambiar_estado('avanzar')
 
-        # 3. ACCIONES
+        elif self.estado in ('girar_izq', 'girar_der'):
+            if self.giro_comprometido:
+                if (ahora - self.tiempo_inicio_giro) > TIEMPO_GIRO_MINIMO:
+                    self.giro_comprometido = False
+            else:
+                if self.d_front >= DIST_PARAR_GIRO + 0.10:
+                    self._cambiar_estado('avanzar')
+
+        # --- ACCIONES ---
         if self.estado == 'girar_180':
-            twist.linear.x = 0.0   # ¡CRUCIAL: No avanzar ni retroceder!
-            twist.angular.z = VEL_GIRO # Giro sobre el eje
+            # GIRO SOBRE EL EJE: Sin movimiento lineal, solo angular
+            twist.linear.x = 0.0
+            twist.angular.z = VEL_GIRO
             
         elif self.estado == 'girar_izq':
             twist.angular.z = VEL_GIRO
@@ -140,8 +167,9 @@ class MazeSolver(Node):
             twist.angular.z = -VEL_GIRO
             twist.linear.x = VEL_AVANCE_GIRO if self.d_front > 0.22 else 0.0
             
-        else: # avanzar / pasillo
-            twist.linear.x = self.velocidad_frenada(self.d_front, VEL_LINEAR_NORMAL)
+        else: # avanzar
+            vel = self.velocidad_frenada(self.d_front, VEL_LINEAR_NORMAL)
+            twist.linear.x = vel
             error = DIST_PARED_DERECHA - self.d_right
             twist.angular.z = max(min(KP * error, 0.40), -0.40)
 
