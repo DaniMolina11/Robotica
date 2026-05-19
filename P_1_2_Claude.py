@@ -9,18 +9,17 @@ import math
 import time
 from collections import deque
 
-# --- PARÁMETROS DE NAVEGACIÓN ---
-DIST_GIRO_PASILLO      = 0.22   
-DIST_PARAR_GIRO        = 0.22   
+# --- PARÁMETROS ---
+DIST_PARAR_GIRO        = 0.25   # Un poco más holgado para evitar rebotes
 DIST_FRENAR            = 0.55   
 DIST_PARED_DERECHA     = 0.25   
 DIST_PASILLO           = 0.45   
 DIST_SEGURIDAD_TRASERA = 0.15   
-DIST_LATERAL_SEGURIDAD = 0.18   # Distancia crítica para reducir giro
+DIST_LATERAL_SEGURIDAD = 0.18   
 
-TICKS_CONFIRMAR_CALLEJON = 6    # Tiempo de espera (0.6s) para confirmar callejón
+TICKS_CONFIRMAR_CALLEJON = 6    
+TICKS_CONFIRMAR_GIRO     = 3    # NUEVO: Confirmar que realmente hay un obstáculo antes de girar
 
-VEL_LINEAR_PASILLO    = 0.06
 VEL_LINEAR_NORMAL     = 0.08
 VEL_RETROCESO         = 0.05
 VEL_GIRO              = 0.28   
@@ -39,18 +38,18 @@ class MazeSolver(Node):
         self.odom_sub = self.create_subscription(Odometry,  '/odom', self.odom_callback, 10)
         self.timer    = self.create_timer(0.1, self.control_loop)
 
-        self.buf_front    = deque(maxlen=N_LECTURAS_PROMEDIO)
-        self.buf_right    = deque(maxlen=N_LECTURAS_PROMEDIO)
-        self.buf_left     = deque(maxlen=N_LECTURAS_PROMEDIO)
-        self.buf_back     = deque(maxlen=N_LECTURAS_PROMEDIO)
+        self.buf_front = deque(maxlen=N_LECTURAS_PROMEDIO)
+        self.buf_right = deque(maxlen=N_LECTURAS_PROMEDIO)
+        self.buf_left  = deque(maxlen=N_LECTURAS_PROMEDIO)
+        self.buf_back  = deque(maxlen=N_LECTURAS_PROMEDIO)
 
         self.d_front = self.d_right = self.d_left = self.d_back = 3.0
         self.lecturas_acumuladas = 0
         
         self.estado              = 'esperando'
         self.tiempo_inicio_giro  = 0.0
-        self.giro_comprometido   = False
         self.ticks_callejon      = 0 
+        self.ticks_giro          = 0 # Contador para debouncing de giro
 
         self.log_file = open(LOG_FILE, 'w')
         self._log_raw('=== INICIO SESION MAZE SOLVER ===')
@@ -63,19 +62,16 @@ class MazeSolver(Node):
     def clean(self, v):
         return 3.0 if (math.isinf(v) or math.isnan(v)) else float(v)
 
-    def sector_min(self, ranges, a, b):
-        return min(self.clean(ranges[i]) for i in range(a, b))
-
     def promedio(self, buf):
         return sum(buf) / len(buf) if buf else 3.0
 
     def scan_callback(self, msg):
         r = msg.ranges
         if len(r) < 360: return
-        self.buf_front.append(min(self.sector_min(r, 350, 360), self.sector_min(r, 0, 10)))
-        self.buf_right.append(self.sector_min(r, 260, 310))
-        self.buf_left.append(self.sector_min(r, 50, 110))
-        self.buf_back.append(self.sector_min(r, 170, 190))
+        self.buf_front.append(min(min(r[350:360]), min(r[0:10])))
+        self.buf_right.append(min(r[260:310]))
+        self.buf_left.append(min(r[50:110]))
+        self.buf_back.append(min(r[170:190]))
         
         self.lecturas_acumuladas += 1
         self.d_front = self.promedio(self.buf_front)
@@ -84,7 +80,6 @@ class MazeSolver(Node):
         self.d_back  = self.promedio(self.buf_back)
 
     def odom_callback(self, msg):
-        # Esta es la función que faltaba
         pass
 
     def _cambiar_estado(self, nuevo):
@@ -100,8 +95,7 @@ class MazeSolver(Node):
 
         ahora = time.time()
         
-        # --- 1. DETECCIÓN DE CALLEJÓN (GATED) ---
-        # Solo se activa si el robot intenta avanzar o está en pasillo. Ignorado mientras gira.
+        # 1. DETECCIÓN DE CALLEJÓN (GATED)
         if self.estado in ('avanzar', 'pasillo'):
             if self.d_front <= 0.25 and self.d_left < 0.35 and self.d_right < 0.35:
                 self.ticks_callejon += 1
@@ -112,47 +106,49 @@ class MazeSolver(Node):
         else:
             self.ticks_callejon = 0 
 
-        # --- 2. MÁQUINA DE ESTADOS ---
+        # 2. MÁQUINA DE ESTADOS
         if self.estado == 'esperando': self._cambiar_estado('avanzar')
 
         elif self.estado == 'avanzar':
+            # Aplicamos debouncing al giro: solo girar si el obstáculo persiste
             if self.d_front < DIST_PARAR_GIRO:
-                lado = 'izq' if self.d_left >= self.d_right else 'der'
-                self._cambiar_estado(f'girar_{lado}')
-                self.tiempo_inicio_giro = ahora
-                self.giro_comprometido = True
+                self.ticks_giro += 1
+                if self.ticks_giro >= TICKS_CONFIRMAR_GIRO:
+                    lado = 'izq' if self.d_left >= self.d_right else 'der'
+                    self._cambiar_estado(f'girar_{lado}')
+                    self.tiempo_inicio_giro = ahora
+            else:
+                self.ticks_giro = 0
 
         elif self.estado == 'retroceder':
             if self.d_left > 0.40 or self.d_right > 0.40:
                 lado = 'izq' if self.d_left > self.d_right else 'der'
                 self._cambiar_estado(f'girar_{lado}')
                 self.tiempo_inicio_giro = ahora
-                self.giro_comprometido = True
 
         elif self.estado in ('girar_izq', 'girar_der'):
             # Permite completar el giro mínimo de 1.5s
             if (ahora - self.tiempo_inicio_giro) > 1.5:
-                if self.d_front >= DIST_PARAR_GIRO + 0.10:
+                # Solo salir si el camino realmente está despejado
+                if self.d_front >= DIST_PARAR_GIRO + 0.05:
                     self._cambiar_estado('avanzar')
+                    self.ticks_giro = 0
 
-        # --- 3. ACCIONES Y CONTROL DE SEGURIDAD ---
+        # 3. ACCIONES
         if self.estado == 'retroceder':
             twist.linear.x = -VEL_RETROCESO if self.d_back > DIST_SEGURIDAD_TRASERA else 0.0
             
         elif self.estado == 'girar_izq':
-            # Control de seguridad lateral: si la pared izquierda está muy cerca, reducimos velocidad angular
             twist.angular.z = VEL_GIRO if self.d_left > DIST_LATERAL_SEGURIDAD else VEL_GIRO * 0.5
-            twist.linear.x = VEL_AVANCE_GIRO if self.d_front > 0.22 else 0.0
+            twist.linear.x = VEL_AVANCE_GIRO if self.d_front > 0.20 else 0.0
             
         elif self.estado == 'girar_der':
-            # Control de seguridad lateral: si la pared derecha está muy cerca, reducimos velocidad angular
             twist.angular.z = -VEL_GIRO if self.d_right > DIST_LATERAL_SEGURIDAD else -VEL_GIRO * 0.5
-            twist.linear.x = VEL_AVANCE_GIRO if self.d_front > 0.22 else 0.0
+            twist.linear.x = VEL_AVANCE_GIRO if self.d_front > 0.20 else 0.0
             
-        else: # avanzar / pasillo
+        else: # avanzar
             vel = self.velocidad_frenada(self.d_front, VEL_LINEAR_NORMAL)
             twist.linear.x = vel
-            # PD simple para seguir pared derecha
             error = DIST_PARED_DERECHA - self.d_right
             twist.angular.z = max(min(KP * error, 0.40), -0.40)
 
