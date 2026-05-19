@@ -10,13 +10,17 @@ import time
 from collections import deque
 
 # --- PARÁMETROS DE NAVEGACIÓN ---
-DIST_GIRO_PASILLO      = 0.32   
-DIST_PARAR_GIRO        = 0.32
+# REDUCIDOS para acercarse más al muro antes de evaluar
+DIST_GIRO_PASILLO      = 0.28   
+DIST_PARAR_GIRO        = 0.28   
 DIST_FRENAR            = 0.55   
 DIST_PARED_DERECHA     = 0.25   
 DIST_PASILLO           = 0.45   
 DIST_SEGURIDAD_TRASERA = 0.15   
-DIST_LATERAL_PURO      = 0.48  # Umbral para los sensores a 90° (un poco más del ancho del pasillo)
+
+# UMBRALES DE HUECO
+DIST_LATERAL_PURO      = 0.45  # Lo que mide un pasillo estándar a los lados
+DIST_DIAG_LIBRE        = 0.50  # En diagonal la distancia a la esquina es mayor
 
 VEL_LINEAR_PASILLO    = 0.06
 VEL_LINEAR_NORMAL     = 0.08
@@ -28,7 +32,7 @@ KP                    = 1.2
 TIEMPO_GIRO_MINIMO       = 1.5
 N_LECTURAS_PROMEDIO      = 5
 TICKS_CONFIRMACION       = 4
-TICKS_CONFIRMAR_CALLEJON = 5  # 0.5 segundos detenido para confirmar el muro cerrado
+TICKS_CONFIRMAR_CALLEJON = 5  # 0.5 segundos detenido evaluando
 
 LOG_FILE = '/home/ros/Escriptori/Robotica/maze_log.txt'
 
@@ -68,7 +72,7 @@ class MazeSolver(Node):
         self.tiempo_inicio_giro  = 0.0
         self.giro_comprometido   = False
         self.ticks_fuera_pasillo = 0
-        self.ticks_callejon      = 0  # Sustituye a giros fallidos
+        self.ticks_callejon      = 0  
 
         self.META_X               = 2.75
         self.META_Y               = 1.71
@@ -138,7 +142,6 @@ class MazeSolver(Node):
         self.buf_diag_izq.append(self.sector_min(r,  30,  60))
         self.buf_diag_der.append(self.sector_min(r, 300, 330))
         
-        # Sensores para detectar aperturas limpias a 90º
         self.d_izq_puro = min(self.clean(r[i]) for i in range(80, 100))
         self.d_der_puro = min(self.clean(r[i]) for i in range(260, 280))
 
@@ -199,13 +202,17 @@ class MazeSolver(Node):
         tiempo_girando = ahora - self.tiempo_inicio_giro
         en_pasillo     = (d_r < DIST_PASILLO and d_l < DIST_PASILLO)
 
+        # Lógica conjunta: Consideramos un lado "cerrado" si TANTO el puro de 90º COMO la diagonal chocan con pared.
+        # Si la diagonal está abierta, significa que es una curva normal a la que nos estamos asomando.
+        izq_cerrada = (self.d_izq_puro < DIST_LATERAL_PURO and self.d_diag_izq < DIST_DIAG_LIBRE)
+        der_cerrada = (self.d_der_puro < DIST_LATERAL_PURO and self.d_diag_der < DIST_DIAG_LIBRE)
+
         # --- MÁQUINA DE ESTADOS SECUENCIAL ---
         if self.estado == 'pasillo':
             if en_pasillo:
                 self.ticks_fuera_pasillo = 0
                 if d_f < DIST_GIRO_PASILLO:
-                    # EVALUACIÓN ESTÁTICA CON SENSORES A 90º
-                    if self.d_izq_puro < DIST_LATERAL_PURO and self.d_der_puro < DIST_LATERAL_PURO:
+                    if izq_cerrada and der_cerrada:
                         self.ticks_callejon += 1
                         if self.ticks_callejon >= TICKS_CONFIRMAR_CALLEJON:
                             self._cambiar_estado('retroceder', 'Callejón confirmado en pasillo')
@@ -226,8 +233,7 @@ class MazeSolver(Node):
                 self.ticks_fuera_pasillo = 0
                 self.ticks_callejon = 0
             elif d_f < DIST_PARAR_GIRO:
-                # EVALUACIÓN ESTÁTICA CON SENSORES A 90º
-                if self.d_izq_puro < DIST_LATERAL_PURO and self.d_der_puro < DIST_LATERAL_PURO:
+                if izq_cerrada and der_cerrada:
                     self.ticks_callejon += 1
                     if self.ticks_callejon >= TICKS_CONFIRMAR_CALLEJON:
                         self._cambiar_estado('retroceder', 'Callejón confirmado en avanzar')
@@ -239,7 +245,6 @@ class MazeSolver(Node):
                 self.ticks_callejon = 0
 
         elif self.estado == 'retroceder':
-            # Evaluamos las diagonales para asegurar que el morro libra la pared antes de volver a girar
             if self.d_diag_izq > 0.45 or self.d_diag_der > 0.45 or self.d_back <= DIST_SEGURIDAD_TRASERA:
                 self.ticks_callejon = 0  
                 self._iniciar_giro(ahora)
@@ -264,7 +269,6 @@ class MazeSolver(Node):
         evento = ''
 
         if self.estado == 'pasillo':
-            # Se queda quieto automáticamente si está validando callejón
             twist.linear.x  = VEL_LINEAR_PASILLO if d_f >= DIST_GIRO_PASILLO else 0.0
             twist.angular.z = 0.0
             evento = f'pasillo_recto f={d_f:.2f}'
@@ -295,7 +299,6 @@ class MazeSolver(Node):
 
         else:  # avanzar
             vel = self.velocidad_frenada(d_f, VEL_LINEAR_NORMAL)
-            # vel ya será 0.0 si d_f < DIST_PARAR_GIRO, perfecto para evaluar en estático
             twist.linear.x = vel
             if d_r > 1.2:
                 twist.angular.z = -0.20
