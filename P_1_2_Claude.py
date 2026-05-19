@@ -10,17 +10,17 @@ import time
 from collections import deque
 
 # --- PARÁMETROS DE NAVEGACIÓN ---
-# REDUCIDOS para acercarse más al muro antes de evaluar
-DIST_GIRO_PASILLO      = 0.28   
-DIST_PARAR_GIRO        = 0.28   
+# Límite físico: acercamos el centro del robot a 22cm del muro frontal
+DIST_GIRO_PASILLO      = 0.22   
+DIST_PARAR_GIRO        = 0.22   
 DIST_FRENAR            = 0.55   
 DIST_PARED_DERECHA     = 0.25   
 DIST_PASILLO           = 0.45   
 DIST_SEGURIDAD_TRASERA = 0.15   
 
 # UMBRALES DE HUECO
-DIST_LATERAL_PURO      = 0.45  # Lo que mide un pasillo estándar a los lados
-DIST_DIAG_LIBRE        = 0.50  # En diagonal la distancia a la esquina es mayor
+DIST_LATERAL_PURO      = 0.45  
+DIST_DIAG_LIBRE        = 0.50  
 
 VEL_LINEAR_PASILLO    = 0.06
 VEL_LINEAR_NORMAL     = 0.08
@@ -32,7 +32,7 @@ KP                    = 1.2
 TIEMPO_GIRO_MINIMO       = 1.5
 N_LECTURAS_PROMEDIO      = 5
 TICKS_CONFIRMACION       = 4
-TICKS_CONFIRMAR_CALLEJON = 5  # 0.5 segundos detenido evaluando
+TICKS_CONFIRMAR_CALLEJON = 5  
 
 LOG_FILE = '/home/ros/Escriptori/Robotica/maze_log.txt'
 
@@ -142,8 +142,9 @@ class MazeSolver(Node):
         self.buf_diag_izq.append(self.sector_min(r,  30,  60))
         self.buf_diag_der.append(self.sector_min(r, 300, 330))
         
-        self.d_izq_puro = min(self.clean(r[i]) for i in range(80, 100))
-        self.d_der_puro = min(self.clean(r[i]) for i in range(260, 280))
+        # MODIFICACIÓN: Visión de reojo. Miramos desde 70º hasta 95º para colar el rayo por la esquina.
+        self.d_izq_puro = min(self.clean(r[i]) for i in range(70, 95))
+        self.d_der_puro = min(self.clean(r[i]) for i in range(265, 290))
 
         self.lecturas_acumuladas += 1
         self.d_front    = self.promedio(self.buf_front)
@@ -202,8 +203,6 @@ class MazeSolver(Node):
         tiempo_girando = ahora - self.tiempo_inicio_giro
         en_pasillo     = (d_r < DIST_PASILLO and d_l < DIST_PASILLO)
 
-        # Lógica conjunta: Consideramos un lado "cerrado" si TANTO el puro de 90º COMO la diagonal chocan con pared.
-        # Si la diagonal está abierta, significa que es una curva normal a la que nos estamos asomando.
         izq_cerrada = (self.d_izq_puro < DIST_LATERAL_PURO and self.d_diag_izq < DIST_DIAG_LIBRE)
         der_cerrada = (self.d_der_puro < DIST_LATERAL_PURO and self.d_diag_der < DIST_DIAG_LIBRE)
 
