@@ -9,7 +9,7 @@ import math
 import time
 from collections import deque
 
-# --- PARÁMETROS DE TU CÓDIGO ORIGINAL ---
+# --- PARÁMETROS ---
 DIST_GIRO_PASILLO      = 0.32   
 DIST_PARAR_GIRO        = 0.32
 DIST_FRENAR            = 0.55   
@@ -17,6 +17,9 @@ DIST_PARED_DERECHA     = 0.25
 DIST_PASILLO           = 0.45   
 DIST_ESQUINA_CERRADA   = 0.20   
 DIST_SEGURIDAD_TRASERA = 0.15   
+
+# NUEVOS PARÁMETROS PARA CALLEJÓN
+TICKS_CONFIRMAR_CALLEJON = 5   # Necesita ver el bloqueo durante 0.5s para confirmar
 
 VEL_LINEAR_PASILLO    = 0.06
 VEL_LINEAR_NORMAL     = 0.08
@@ -64,6 +67,7 @@ class MazeSolver(Node):
         self.tiempo_inicio_giro      = 0.0
         self.giro_comprometido       = False
         self.ticks_fuera_pasillo     = 0
+        self.ticks_callejon          = 0 # CONTADOR PARA CONFIRMAR CALLEJÓN
 
         self.META_X               = 2.75
         self.META_Y               = 1.71
@@ -76,14 +80,6 @@ class MazeSolver(Node):
 
         self.log_file = open(LOG_FILE, 'w')
         self._log_raw('=== INICIO SESION MAZE SOLVER ===')
-        self._log_raw(
-            f'Params: DIST_GIRO={DIST_GIRO_PASILLO} DIST_PARAR={DIST_PARAR_GIRO} '
-            f'VEL_NORMAL={VEL_LINEAR_NORMAL} VEL_GIRO={VEL_GIRO} VEL_AVANCE_GIRO={VEL_AVANCE_GIRO}'
-        )
-        self._log_raw(
-            'TSIM      | POS_X  | POS_Y  | ESTADO       | '
-            'F     | R     | L     | DI    | DD    | VL      | VA      | EVENTO'
-        )
         self._log_raw('-' * 130)
 
     def _log_raw(self, msg):
@@ -105,7 +101,6 @@ class MazeSolver(Node):
             f'*** {msg} | estado={self.estado} '
             f'pos=({self.pos_x:.3f},{self.pos_y:.3f}) '
             f'F={self.d_front:.2f} R={self.d_right:.2f} L={self.d_left:.2f} '
-            f'DI={self.d_diag_izq:.2f} DD={self.d_diag_der:.2f}'
         )
 
     def clean(self, v):
@@ -172,13 +167,8 @@ class MazeSolver(Node):
         en_pasillo = (self.d_right < DIST_PASILLO and self.d_left < DIST_PASILLO)
         if en_pasillo:
             lado = 'izq' if self.d_diag_izq >= self.d_diag_der else 'der'
-            self._log_evento(
-                f'Giro en PASILLO por diagonal: lado={lado} '
-                f'DI={self.d_diag_izq:.2f} DD={self.d_diag_der:.2f}'
-            )
         else:
             lado = 'izq' if self.d_left >= self.d_right else 'der'
-            self._log_evento(f'Giro NORMAL: lado={lado}')
         return lado
 
     def _iniciar_giro(self, ahora):
@@ -191,12 +181,10 @@ class MazeSolver(Node):
         twist = Twist()
 
         if self.meta_alcanzada:
-            self._log_tick('META - detenido')
             self.cmd_pub.publish(twist)
             return
 
         if self.lecturas_acumuladas < N_LECTURAS_PROMEDIO:
-            self._log_tick(f'acumulando {self.lecturas_acumuladas}/{N_LECTURAS_PROMEDIO}')
             self.cmd_pub.publish(twist)
             return
 
@@ -207,30 +195,22 @@ class MazeSolver(Node):
         d_r = self.d_right
         d_l = self.d_left
 
-        ahoraStr = time.strftime('%H:%M:%S')
         ahora          = time.time()
         tiempo_girando = ahora - self.tiempo_inicio_giro
         en_pasillo     = (d_r < DIST_PASILLO and d_l < DIST_PASILLO)
 
-        # --- REGLA PROTEGIDA EN LÍNEA RECTA ---
+        # --- LÓGICA DE DETECCIÓN DE CALLEJÓN (CONFIRMACIÓN) ---
         if self.estado in ('avanzar', 'pasillo'):
-            # Ajustado a 0.24 para capturar el callejón con suficiente margen
-            callejon_muerto = (d_f <= 0.24 and d_l < 0.30 and d_r < 0.30)
-            if callejon_muerto:
-                self._cambiar_estado('retroceder', 'callejon detectado (frente y laterales bloqueados)')
-                self.giro_comprometido = False
-                self.reset_filtros()  # NUEVO: Vaciamos los buffers antiguos para que el láser responda al milisegundo
-                return
-
-        if self.estado in ('avanzar', 'pasillo'):
-            esquina_cerrada = (d_f < DIST_ESQUINA_CERRADA and
-                               d_r < DIST_ESQUINA_CERRADA + 0.05 and
-                               d_l < DIST_ESQUINA_CERRADA + 0.05)
-            if esquina_cerrada:
-                self._cambiar_estado('retroceder', 'emergencia: esquina cerrada')
+            # Si frente, izquierda y derecha están bloqueados
+            if d_f <= 0.25 and d_l < 0.35 and d_r < 0.35:
+                self.ticks_callejon += 1
+            else:
+                self.ticks_callejon = 0
+            
+            if self.ticks_callejon >= TICKS_CONFIRMAR_CALLEJON:
+                self._cambiar_estado('retroceder', 'callejón confirmado')
                 self.giro_comprometido = False
                 self.reset_filtros()
-                return
 
         # --- MÁQUINA DE ESTADOS ---
         if self.estado == 'pasillo':
@@ -252,10 +232,10 @@ class MazeSolver(Node):
                 self._iniciar_giro(ahora)
 
         elif self.estado == 'retroceder':
-            # Buscamos la salida del callejón basándonos en datos instantáneos limpios
+            # Solo si detecta apertura lateral significativa, salimos del retroceso
             if self.d_left > 0.40 or self.d_right > 0.40:
                 lado = 'izq' if self.d_left > self.d_right else 'der'
-                self._cambiar_estado(f'girar_{lado}', f'salida trasera encontrada hacia {lado}')
+                self._cambiar_estado(f'girar_{lado}', f'salida encontrada hacia {lado}')
                 self.tiempo_inicio_giro = ahora
                 self.giro_comprometido  = True
 
@@ -265,70 +245,46 @@ class MazeSolver(Node):
                     self.giro_comprometido = False
             else:
                 if d_f >= DIST_PARAR_GIRO + 0.10:
-                    self._cambiar_estado('avanzar', f'frente libre d_f={d_f:.2f}')
+                    self._cambiar_estado('avanzar', 'frente libre')
                 elif d_f < DIST_PARAR_GIRO - 0.05:
                     self._iniciar_giro(ahora)
-
-        elif self.estado == 'escape':
-            if d_f > DIST_PARAR_GIRO:
-                self._cambiar_estado('avanzar', 'escape completado')
 
         # --- APLICACIÓN DE VELOCIDADES ---
         evento = ''
         if self.estado == 'pasillo':
             twist.linear.x  = VEL_LINEAR_PASILLO
-            twist.angular.z = 0.0
-            evento = f'pasillo_recto f={d_f:.2f}'
+            evento = 'pasillo_recto'
             
         elif self.estado == 'retroceder':
             if self.d_back > DIST_SEGURIDAD_TRASERA:
                 twist.linear.x = -VEL_RETROCESO
+                evento = 'retrocediendo'
             else:
                 twist.linear.x = 0.0
-            # NUEVO: Bloqueamos el giro angular a 0.0 de forma estricta.
-            # Al no balancear las ruedas de lado a lado con retardos, el robot clava una línea recta perfecta.
-            twist.angular.z = 0.0  
-            evento = f'retrocediendo_recto_puro B={self.d_back:.2f}'
-            
-        elif self.estado == 'escape':
-            twist.linear.x  = -0.05
-            twist.angular.z = VEL_GIRO
-            evento = 'escape'
+                evento = 'retroceso_parado'
+            twist.angular.z = 0.0  # Mantenemos recta pura
             
         elif self.estado == 'girar_izq':
             twist.linear.x  = VEL_AVANCE_GIRO if d_f > 0.22 else 0.0
             twist.angular.z = VEL_GIRO
-            evento = f'girar_izq arco={twist.linear.x>0} t={tiempo_girando:.1f}s'
+            evento = f'girar_izq t={tiempo_girando:.1f}s'
             
         elif self.estado == 'girar_der':
             twist.linear.x  = VEL_AVANCE_GIRO if d_f > 0.22 else 0.0
             twist.angular.z = -VEL_GIRO
-            evento = f'girar_der arco={twist.linear.x>0} t={tiempo_girando:.1f}s'
+            evento = f'girar_der t={tiempo_girando:.1f}s'
             
         else:  # avanzar
             vel = self.velocidad_frenada(d_f, VEL_LINEAR_NORMAL)
             twist.linear.x = vel
-            if d_r > 1.2:
-                twist.angular.z = -0.20
-                evento = f'buscando_pared vel={vel:.3f}'
-            else:
-                error = DIST_PARED_DERECHA - d_r
-                twist.angular.z = max(min(KP * error, 0.40), -0.40)
-                evento = f'siguiendo_pared_der err={error:.3f} vel={vel:.3f}'
-            if vel < VEL_LINEAR_NORMAL:
-                evento += ' FRENANDO'
+            error = DIST_PARED_DERECHA - d_r
+            twist.angular.z = max(min(KP * error, 0.40), -0.40)
+            evento = f'avanzar err={error:.3f}'
 
         self.vel_lin_pub = twist.linear.x
         self.vel_ang_pub = twist.angular.z
         self._log_tick(evento)
         self.cmd_pub.publish(twist)
-
-    def __del__(self):
-        try:
-            self._log_raw('=== FIN SESION ===')
-            self.log_file.close()
-        except Exception:
-            pass
 
 def main(args=None):
     rclpy.init(args=args)
@@ -338,7 +294,6 @@ def main(args=None):
     except KeyboardInterrupt:
         pass
     finally:
-        nodo._log_raw('=== INTERRUPCION USUARIO ===')
         nodo.cmd_pub.publish(Twist())
         nodo.log_file.close()
         nodo.destroy_node()
