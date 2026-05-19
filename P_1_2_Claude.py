@@ -10,16 +10,14 @@ import time
 from collections import deque
 
 # --- PARÁMETROS ---
-DIST_PARAR_GIRO        = 0.25   
+DIST_PARAR_GIRO        = 0.30   # Ligeramente más lejos para evitar colisiones
 DIST_FRENAR            = 0.55   
 DIST_PARED_DERECHA     = 0.25   
 DIST_PASILLO           = 0.45   
-DIST_SEGURIDAD_TRASERA = 0.15   # Distancia crítica trasera
+DIST_SEGURIDAD_TRASERA = 0.15   
 DIST_LATERAL_SEGURIDAD = 0.18   
 
-TICKS_CONFIRMAR_CALLEJON = 6    
-TICKS_CONFIRMAR_GIRO     = 3    
-
+TICKS_CONFIRMAR_CALLEJON = 10   # Un poco más lento para evitar falsos positivos
 VEL_LINEAR_NORMAL     = 0.08
 VEL_RETROCESO         = 0.05
 VEL_GIRO              = 0.28   
@@ -48,7 +46,6 @@ class MazeSolver(Node):
         self.estado              = 'esperando'
         self.tiempo_inicio_giro  = 0.0
         self.ticks_callejon      = 0 
-        self.ticks_giro          = 0 
 
         self.log_file = open(LOG_FILE, 'w')
         self._log_raw('=== INICIO SESION MAZE SOLVER ===')
@@ -94,9 +91,10 @@ class MazeSolver(Node):
 
         ahora = time.time()
         
-        # 1. DETECCIÓN DE CALLEJÓN (Solo si avanzamos)
+        # --- 1. DETECCIÓN DE CALLEJÓN (GATED) ---
+        # Solo cuenta si estamos intentando avanzar. Si giramos, reset.
         if self.estado in ('avanzar', 'pasillo'):
-            if self.d_front <= 0.25 and self.d_left < 0.35 and self.d_right < 0.35:
+            if self.d_front <= 0.20 and self.d_left < 0.35 and self.d_right < 0.35:
                 self.ticks_callejon += 1
                 if self.ticks_callejon >= TICKS_CONFIRMAR_CALLEJON:
                     self._cambiar_estado('retroceder')
@@ -105,61 +103,51 @@ class MazeSolver(Node):
         else:
             self.ticks_callejon = 0 
 
-        # 2. MÁQUINA DE ESTADOS
+        # --- 2. MÁQUINA DE ESTADOS ---
         if self.estado == 'esperando': self._cambiar_estado('avanzar')
 
         elif self.estado == 'avanzar':
             if self.d_front < DIST_PARAR_GIRO:
-                self.ticks_giro += 1
-                if self.ticks_giro >= TICKS_CONFIRMAR_GIRO:
-                    lado = 'izq' if self.d_left >= self.d_right else 'der'
-                    self._cambiar_estado(f'girar_{lado}')
-                    self.tiempo_inicio_giro = ahora
-            else:
-                self.ticks_giro = 0
+                lado = 'izq' if self.d_left >= self.d_right else 'der'
+                self._cambiar_estado(f'girar_{lado}')
+                self.tiempo_inicio_giro = ahora
 
         elif self.estado == 'retroceder':
-            # CONDICIÓN DE SALIDA 1: Apertura lateral
-            if self.d_left > 0.35 or self.d_right > 0.35:
+            # Solo retrocede mientras tenga sitio atrás y no haya visto hueco lateral
+            if self.d_left > 0.40 or self.d_right > 0.40:
                 lado = 'izq' if self.d_left > self.d_right else 'der'
                 self._cambiar_estado(f'girar_{lado}')
                 self.tiempo_inicio_giro = ahora
-            # CONDICIÓN DE SALIDA 2: Seguridad (contra la pared trasera)
-            elif self.d_back <= (DIST_SEGURIDAD_TRASERA + 0.05):
+            elif self.d_back <= DIST_SEGURIDAD_TRASERA:
                 self._cambiar_estado('girar_der')
                 self.tiempo_inicio_giro = ahora
 
         elif self.estado in ('girar_izq', 'girar_der'):
+            # El giro dura mínimo 1.5s
             if (ahora - self.tiempo_inicio_giro) > 1.5:
+                # Si el camino está despejado al terminar el giro, vuelve a avanzar
                 if self.d_front >= DIST_PARAR_GIRO + 0.05:
                     self._cambiar_estado('avanzar')
-                    self.ticks_giro = 0
 
-        # 3. ACCIONES
+        # --- 3. ACCIONES Y CONTROL DE SEGURIDAD ---
         if self.estado == 'retroceder':
-            # Solo retrocede si no hemos chocado atrás
-            twist.linear.x = -VEL_RETROCESO if self.d_back > DIST_SEGURIDAD_TRASERA else 0.0
+            twist.linear.x = -VEL_RETROCESO
             
         elif self.estado == 'girar_izq':
-            twist.angular.z = VEL_GIRO if self.d_left > DIST_LATERAL_SEGURIDAD else VEL_GIRO * 0.5
+            twist.angular.z = VEL_GIRO
             twist.linear.x = VEL_AVANCE_GIRO if self.d_front > 0.20 else 0.0
             
         elif self.estado == 'girar_der':
-            twist.angular.z = -VEL_GIRO if self.d_right > DIST_LATERAL_SEGURIDAD else -VEL_GIRO * 0.5
+            twist.angular.z = -VEL_GIRO
             twist.linear.x = VEL_AVANCE_GIRO if self.d_front > 0.20 else 0.0
             
         else: # avanzar
-            vel = self.velocidad_frenada(self.d_front, VEL_LINEAR_NORMAL)
+            vel = VEL_LINEAR_NORMAL
             twist.linear.x = vel
             error = DIST_PARED_DERECHA - self.d_right
             twist.angular.z = max(min(KP * error, 0.40), -0.40)
 
         self.cmd_pub.publish(twist)
-
-    def velocidad_frenada(self, d_front, vel_max):
-        if d_front >= DIST_FRENAR: return vel_max
-        if d_front <= DIST_PARAR_GIRO: return 0.0
-        return round(vel_max * ((d_front - DIST_PARAR_GIRO) / (DIST_FRENAR - DIST_PARAR_GIRO)), 3)
 
 def main(args=None):
     rclpy.init(args=args)
