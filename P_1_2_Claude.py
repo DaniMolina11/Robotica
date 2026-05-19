@@ -169,17 +169,18 @@ class MazeSolver(Node):
             self.estado = nuevo
 
     def _decidir_lado_giro(self):
+        # Aumentamos la tolerancia para asegurar que siempre elija un lado
         en_pasillo = (self.d_right < DIST_PASILLO and self.d_left < DIST_PASILLO)
         if en_pasillo:
+            # Priorizamos giros más abiertos según la diagonal
             lado = 'izq' if self.d_diag_izq >= self.d_diag_der else 'der'
-            self._log_evento(
-                f'Giro en PASILLO por diagonal: lado={lado} '
-                f'DI={self.d_diag_izq:.2f} DD={self.d_diag_der:.2f}'
-            )
         else:
+            # Giro forzado: siempre elegimos el lado con más espacio
             lado = 'izq' if self.d_left >= self.d_right else 'der'
-            self._log_evento(f'Giro NORMAL: lado={lado}')
+        
+        self._log_evento(f'Decisión de giro: {lado} (L={self.d_left:.2f}, R={self.d_right:.2f})')
         return lado
+
 
     def _iniciar_giro(self, ahora):
         lado = self._decidir_lado_giro()
