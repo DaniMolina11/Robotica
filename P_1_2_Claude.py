@@ -52,6 +52,10 @@ class MazeSolver(Node):
         self.d_back     = 3.0
         self.d_diag_izq = 3.0
         self.d_diag_der = 3.0
+        
+        # Nuevos sensores de visión exacta lateral
+        self.d_izq_puro = 3.0
+        self.d_der_puro = 3.0
 
         self.pos_x = 0.0
         self.pos_y = 0.0
@@ -144,6 +148,11 @@ class MazeSolver(Node):
         self.buf_back.append(    self.sector_min(r, 170, 190))
         self.buf_diag_izq.append(self.sector_min(r,  30,  60))
         self.buf_diag_der.append(self.sector_min(r, 300, 330))
+        
+        # Rayos puros a los laterales (miran exactamente por el hueco del pasillo)
+        self.d_izq_puro = min(self.clean(r[i]) for i in range(80, 100))
+        self.d_der_puro = min(self.clean(r[i]) for i in range(260, 280))
+
         self.lecturas_acumuladas += 1
         self.d_front    = self.promedio(self.buf_front)
         self.d_right    = self.promedio(self.buf_right)
@@ -210,24 +219,18 @@ class MazeSolver(Node):
         tiempo_girando = ahora - self.tiempo_inicio_giro
         en_pasillo     = (d_r < DIST_PASILLO and d_l < DIST_PASILLO)
 
-        # -------------------------------------------------------------------
-        # MÁQUINA DE ESTADOS (TU LOGICA SECUENCIAL EXACTA)
-        # -------------------------------------------------------------------
-
+        # --- MÁQUINA DE ESTADOS SECUENCIAL (TU LÓGICA) ---
         if self.estado == 'pasillo':
             if en_pasillo:
                 self.ticks_fuera_pasillo = 0
                 if d_f < DIST_GIRO_PASILLO:
-                    # SECUENCIAL: ¿Hay camino a los lados?
-                    hay_camino_izq = (d_l >= 0.40)
-                    hay_camino_der = (d_r >= 0.40)
-
-                    if not hay_camino_izq and not hay_camino_der:
-                        # Si no hay camino en NINGÚN lado → Callejón confirmado → Retroceder
-                        self._cambiar_estado('retroceder', 'callejon sin salida real (lados cerrados)')
+                    # LÓGICA INFALIBLE: Miramos los laterales puros para saber si hay camino.
+                    # Si ambos laterales miden menos del ancho de un pasillo, es que están tapiados.
+                    if self.d_izq_puro < 0.45 and self.d_der_puro < 0.45:
+                        self._cambiar_estado('retroceder', 'No hay camino, callejon real detectado.')
                         self.reset_filtros()
                     else:
-                        # Si hay camino en la izquierda o en la derecha → Giro normal tuyo
+                        # Si hay camino, ejecuta tu giro de siempre
                         self._iniciar_giro(ahora)
             else:
                 self.ticks_fuera_pasillo += 1
@@ -240,26 +243,21 @@ class MazeSolver(Node):
                 self._cambiar_estado('pasillo', 'pasillo detectado')
                 self.ticks_fuera_pasillo = 0
             elif d_f < DIST_PARAR_GIRO:
-                # SECUENCIAL: ¿Hay camino a los lados?
-                hay_camino_izq = (d_l >= 0.40)
-                hay_camino_der = (d_r >= 0.40)
-
-                if not hay_camino_izq and not hay_camino_der:
-                    # Si no hay camino en NINGÚN lado → Callejón confirmado → Retroceder
-                    self._cambiar_estado('retroceder', 'callejon sin salida real (lados cerrados)')
+                # LÓGICA INFALIBLE: Miramos los laterales puros para saber si hay camino.
+                if self.d_izq_puro < 0.45 and self.d_der_puro < 0.45:
+                    self._cambiar_estado('retroceder', 'No hay camino, callejon real detectado.')
                     self.reset_filtros()
                 else:
-                    # Si hay camino en la izquierda o en la derecha → Giro normal tuyo
+                    # Si hay camino, ejecuta tu giro de siempre
                     self._iniciar_giro(ahora)
 
         elif self.estado == 'retroceder':
-            # Retrocede perfectamente recto. Sale al detectar que un pasillo lateral se abre (>0.40m)
-            # o si el culo roza la pared trasera por seguridad.
-            if self.d_left > 0.40 or self.d_right > 0.40 or self.d_back <= DIST_SEGURIDAD_TRASERA:
+            # Vamos marcha atrás hasta que un lado se abra o rocemós el culo por seguridad
+            if self.d_izq_puro > 0.45 or self.d_der_puro > 0.45 or self.d_back <= DIST_SEGURIDAD_TRASERA:
                 self._iniciar_giro(ahora)
 
         elif self.estado in ('girar_izq', 'girar_der'):
-            # TUS GIROS ORIGINALES COMPLETAMENTE INTACTOS. Cero marchas atrás añadidas aquí dentro.
+            # TUS GIROS ORIGINALES INTACTOS. Cero marchas atrás aquí.
             if self.giro_comprometido:
                 if tiempo_girando >= TIEMPO_GIRO_MINIMO:
                     self.giro_comprometido = False
@@ -273,9 +271,7 @@ class MazeSolver(Node):
             if d_f > DIST_PARAR_GIRO:
                 self._cambiar_estado('avanzar', 'escape completado')
 
-        # -------------------------------------------------------------------
-        # APLICACIÓN DE VELOCIDADES ORIGINALES
-        # -------------------------------------------------------------------
+        # --- APLICACIÓN DE VELOCIDADES ORIGINALES ---
         evento = ''
 
         if self.estado == 'pasillo':
@@ -289,8 +285,8 @@ class MazeSolver(Node):
                 evento = f'retrocediendo B={self.d_back:.2f}'
             else:
                 twist.linear.x = 0.0
-                evento = f'retroceso_parado_muro'
-            twist.angular.z = 0.0 # Marcha atrás recta obligatoria para no chocar de lado
+                evento = f'retroceso_parado B={self.d_back:.2f}'
+            twist.angular.z = 0.0 # Marcha atrás limpia y recta obligatoria
 
         elif self.estado == 'escape':
             twist.linear.x  = -0.05
@@ -307,7 +303,7 @@ class MazeSolver(Node):
             twist.angular.z = -VEL_GIRO
             evento = f'girar_der arco={twist.linear.x > 0} t={tiempo_girando:.1f}s'
 
-        else:  # avanzar (CON TU SEGUIDOR DE PARED ORIGINAL)
+        else:  # avanzar (CON TU LÓGICA DE PARED DERECHA)
             vel = self.velocidad_frenada(d_f, VEL_LINEAR_NORMAL)
             twist.linear.x = vel
             if d_r > 1.2:
