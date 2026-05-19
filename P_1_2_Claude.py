@@ -217,7 +217,7 @@ class MazeSolver(Node):
             # Ajustado a 0.24 para capturar el callejón con suficiente margen
             callejon_muerto = (d_f <= 0.24 and d_l < 0.30 and d_r < 0.30)
             if callejon_muerto:
-                self._cambiar_estado('retroceder', 'callejon detectado (frente y laterales bloqueados)')
+                self._cambiar_estado('giro_180', 'callejon detectado (frente y laterales bloqueados)')
                 self.giro_comprometido = False
                 self.reset_filtros()  # NUEVO: Vaciamos los buffers antiguos para que el láser responda al milisegundo
                 return
@@ -227,7 +227,7 @@ class MazeSolver(Node):
                                d_r < DIST_ESQUINA_CERRADA + 0.05 and
                                d_l < DIST_ESQUINA_CERRADA + 0.05)
             if esquina_cerrada:
-                self._cambiar_estado('retroceder', 'emergencia: esquina cerrada')
+                self._cambiar_estado('giro_180', 'emergencia: esquina cerrada')
                 self.giro_comprometido = False
                 self.reset_filtros()
                 return
@@ -251,13 +251,10 @@ class MazeSolver(Node):
             elif d_f < DIST_PARAR_GIRO:
                 self._iniciar_giro(ahora)
 
-        elif self.estado == 'retroceder':
-            # Buscamos la salida del callejón basándonos en datos instantáneos limpios
-            if self.d_left > 0.40 or self.d_right > 0.40:
-                lado = 'izq' if self.d_left > self.d_right else 'der'
-                self._cambiar_estado(f'girar_{lado}', f'salida trasera encontrada hacia {lado}')
-                self.tiempo_inicio_giro = ahora
-                self.giro_comprometido  = True
+        elif self.estado == 'giro_180':
+            # Gira sobre sí mismo hasta que vea el pasillo libre de nuevo
+            if d_f > 0.40:
+                self._cambiar_estado('avanzar', 'salida encontrada de frente')
 
         elif self.estado in ('girar_izq', 'girar_der'):
             if self.giro_comprometido:
@@ -280,15 +277,10 @@ class MazeSolver(Node):
             twist.angular.z = 0.0
             evento = f'pasillo_recto f={d_f:.2f}'
             
-        elif self.estado == 'retroceder':
-            if self.d_back > DIST_SEGURIDAD_TRASERA:
-                twist.linear.x = -VEL_RETROCESO
-            else:
-                twist.linear.x = 0.0
-            # NUEVO: Bloqueamos el giro angular a 0.0 de forma estricta.
-            # Al no balancear las ruedas de lado a lado con retardos, el robot clava una línea recta perfecta.
-            twist.angular.z = 0.0  
-            evento = f'retrocediendo_recto_puro B={self.d_back:.2f}'
+        elif self.estado == 'giro_180':
+            twist.linear.x = 0.0
+            twist.angular.z = VEL_GIRO
+            evento = f'pivotando_180 F={d_f:.2f}'
             
         elif self.estado == 'escape':
             twist.linear.x  = -0.05
