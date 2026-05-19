@@ -10,7 +10,7 @@ import time
 from collections import deque
 
 # --- PARÁMETROS DE NAVEGACIÓN ---
-DIST_GIRO_PASILLO      = 0.22   # Aproximación al muro para detectar mejor los cruces
+DIST_GIRO_PASILLO      = 0.22   
 DIST_PARAR_GIRO        = 0.22   
 DIST_FRENAR            = 0.55   
 DIST_PARED_DERECHA     = 0.25   
@@ -18,8 +18,6 @@ DIST_PASILLO           = 0.45
 DIST_SEGURIDAD_TRASERA = 0.15   
 DIST_LATERAL_SEGURIDAD = 0.18   # Distancia crítica para reducir giro
 
-# UMBRALES DE HUECO
-DIST_LATERAL_PURO      = 0.45  
 TICKS_CONFIRMAR_CALLEJON = 6    # Tiempo de espera (0.6s) para confirmar callejón
 
 VEL_LINEAR_PASILLO    = 0.06
@@ -47,9 +45,8 @@ class MazeSolver(Node):
         self.buf_back     = deque(maxlen=N_LECTURAS_PROMEDIO)
 
         self.d_front = self.d_right = self.d_left = self.d_back = 3.0
-        self.d_izq_puro = self.d_der_puro = 3.0
-
         self.lecturas_acumuladas = 0
+        
         self.estado              = 'esperando'
         self.tiempo_inicio_giro  = 0.0
         self.giro_comprometido   = False
@@ -74,20 +71,21 @@ class MazeSolver(Node):
 
     def scan_callback(self, msg):
         r = msg.ranges
+        if len(r) < 360: return
         self.buf_front.append(min(self.sector_min(r, 350, 360), self.sector_min(r, 0, 10)))
         self.buf_right.append(self.sector_min(r, 260, 310))
         self.buf_left.append(self.sector_min(r, 50, 110))
         self.buf_back.append(self.sector_min(r, 170, 190))
         
-        # Visión de reojo para anticipar cruces
-        self.d_izq_puro = min(self.clean(r[i]) for i in range(70, 95))
-        self.d_der_puro = min(self.clean(r[i]) for i in range(265, 290))
-
         self.lecturas_acumuladas += 1
         self.d_front = self.promedio(self.buf_front)
         self.d_right = self.promedio(self.buf_right)
         self.d_left  = self.promedio(self.buf_left)
         self.d_back  = self.promedio(self.buf_back)
+
+    def odom_callback(self, msg):
+        # Esta es la función que faltaba
+        pass
 
     def _cambiar_estado(self, nuevo):
         if nuevo != self.estado:
@@ -103,7 +101,7 @@ class MazeSolver(Node):
         ahora = time.time()
         
         # --- 1. DETECCIÓN DE CALLEJÓN (GATED) ---
-        # Solo se activa si el robot intenta avanzar. Se ignora mientras gira.
+        # Solo se activa si el robot intenta avanzar o está en pasillo. Ignorado mientras gira.
         if self.estado in ('avanzar', 'pasillo'):
             if self.d_front <= 0.25 and self.d_left < 0.35 and self.d_right < 0.35:
                 self.ticks_callejon += 1
@@ -132,7 +130,7 @@ class MazeSolver(Node):
                 self.giro_comprometido = True
 
         elif self.estado in ('girar_izq', 'girar_der'):
-            # Permite completar el giro mínimo
+            # Permite completar el giro mínimo de 1.5s
             if (ahora - self.tiempo_inicio_giro) > 1.5:
                 if self.d_front >= DIST_PARAR_GIRO + 0.10:
                     self._cambiar_estado('avanzar')
@@ -142,17 +140,18 @@ class MazeSolver(Node):
             twist.linear.x = -VEL_RETROCESO if self.d_back > DIST_SEGURIDAD_TRASERA else 0.0
             
         elif self.estado == 'girar_izq':
-            # Control de seguridad lateral durante el giro
+            # Control de seguridad lateral: si la pared izquierda está muy cerca, reducimos velocidad angular
             twist.angular.z = VEL_GIRO if self.d_left > DIST_LATERAL_SEGURIDAD else VEL_GIRO * 0.5
             twist.linear.x = VEL_AVANCE_GIRO if self.d_front > 0.22 else 0.0
             
         elif self.estado == 'girar_der':
-            # Control de seguridad lateral durante el giro
+            # Control de seguridad lateral: si la pared derecha está muy cerca, reducimos velocidad angular
             twist.angular.z = -VEL_GIRO if self.d_right > DIST_LATERAL_SEGURIDAD else -VEL_GIRO * 0.5
             twist.linear.x = VEL_AVANCE_GIRO if self.d_front > 0.22 else 0.0
             
         else: # avanzar / pasillo
-            twist.linear.x = self.velocidad_frenada(self.d_front, VEL_LINEAR_NORMAL)
+            vel = self.velocidad_frenada(self.d_front, VEL_LINEAR_NORMAL)
+            twist.linear.x = vel
             # PD simple para seguir pared derecha
             error = DIST_PARED_DERECHA - self.d_right
             twist.angular.z = max(min(KP * error, 0.40), -0.40)
