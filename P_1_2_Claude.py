@@ -207,30 +207,9 @@ class MazeSolver(Node):
         d_r = self.d_right
         d_l = self.d_left
 
-        ahoraStr = time.strftime('%H:%M:%S')
         ahora          = time.time()
         tiempo_girando = ahora - self.tiempo_inicio_giro
         en_pasillo     = (d_r < DIST_PASILLO and d_l < DIST_PASILLO)
-
-        # --- REGLA PROTEGIDA EN LÍNEA RECTA ---
-        if self.estado in ('avanzar', 'pasillo'):
-            # Ajustado a 0.24 para capturar el callejón con suficiente margen
-            callejon_muerto = (d_f <= 0.24 and d_l < 0.30 and d_r < 0.30)
-            if callejon_muerto:
-                self._cambiar_estado('retroceder', 'callejon detectado (frente y laterales bloqueados)')
-                self.giro_comprometido = False
-                self.reset_filtros()  # NUEVO: Vaciamos los buffers antiguos para que el láser responda al milisegundo
-                return
-
-        if self.estado in ('avanzar', 'pasillo'):
-            esquina_cerrada = (d_f < DIST_ESQUINA_CERRADA and
-                               d_r < DIST_ESQUINA_CERRADA + 0.05 and
-                               d_l < DIST_ESQUINA_CERRADA + 0.05)
-            if esquina_cerrada:
-                self._cambiar_estado('retroceder', 'emergencia: esquina cerrada')
-                self.giro_comprometido = False
-                self.reset_filtros()
-                return
 
         # --- MÁQUINA DE ESTADOS ---
         if self.estado == 'pasillo':
@@ -251,27 +230,36 @@ class MazeSolver(Node):
             elif d_f < DIST_PARAR_GIRO:
                 self._iniciar_giro(ahora)
 
-        elif self.estado == 'retroceder':
-            # Buscamos la salida del callejón basándonos en datos instantáneos limpios
-            if self.d_left > 0.40 or self.d_right > 0.40:
-                lado = 'izq' if self.d_left > self.d_right else 'der'
-                self._cambiar_estado(f'girar_{lado}', f'salida trasera encontrada hacia {lado}')
-                self.tiempo_inicio_giro = ahora
-                self.giro_comprometido  = True
-
         elif self.estado in ('girar_izq', 'girar_der'):
+            # ESTA ES TU LÓGICA ORIGINAL
             if self.giro_comprometido:
                 if tiempo_girando >= TIEMPO_GIRO_MINIMO:
                     self.giro_comprometido = False
             else:
-                if d_f >= DIST_PARAR_GIRO + 0.10:
+                # --- AQUÍ AÑADIMOS LA DETECCIÓN DE CALLEJÓN ---
+                if d_f < 0.25 and self.d_left < 0.35 and self.d_right < 0.35:
+                    self._cambiar_estado('giro_180', 'Callejón detectado: giro 180')
+                    self.tiempo_inicio_giro = ahora # Reiniciamos tiempo para el pivotaje
+                elif d_f >= DIST_PARAR_GIRO + 0.10:
                     self._cambiar_estado('avanzar', f'frente libre d_f={d_f:.2f}')
                 elif d_f < DIST_PARAR_GIRO - 0.05:
                     self._iniciar_giro(ahora)
 
+        # --- AQUÍ AÑADIMOS EL ESTADO DE PIVOTAJE ---
+        elif self.estado == 'giro_180':
+            twist.linear.x = 0.0
+            twist.angular.z = VEL_GIRO
+            # El robot gira sobre sí mismo hasta completar la vuelta (3.5s aprox)
+            if (ahora - self.tiempo_inicio_giro) > 3.5:
+                self._cambiar_estado('avanzar', 'vuelta completada')
+
         elif self.estado == 'escape':
             if d_f > DIST_PARAR_GIRO:
                 self._cambiar_estado('avanzar', 'escape completado')
+
+        # --- APLICACIÓN DE VELOCIDADES ---
+        # (Aquí va el resto de tu código original, no lo borres)
+        # ...
 
         # --- APLICACIÓN DE VELOCIDADES ---
         evento = ''
