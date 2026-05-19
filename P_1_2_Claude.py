@@ -9,15 +9,14 @@ import math
 import time
 from collections import deque
 
-# --- PARÁMETROS DE TU CÓDIGO ---
+# --- PARÁMETROS DE NAVEGACIÓN ---
 DIST_GIRO_PASILLO      = 0.32   
 DIST_PARAR_GIRO        = 0.32
 DIST_FRENAR            = 0.55   
 DIST_PARED_DERECHA     = 0.25   
 DIST_PASILLO           = 0.45   
 DIST_SEGURIDAD_TRASERA = 0.15   
-DIST_LATERAL_LIBRE     = 0.38  
-MAX_GIROS_FALLIDOS     = 2     
+DIST_LATERAL_PURO      = 0.48  # Umbral para los sensores a 90° (un poco más del ancho del pasillo)
 
 VEL_LINEAR_PASILLO    = 0.06
 VEL_LINEAR_NORMAL     = 0.08
@@ -26,9 +25,10 @@ VEL_GIRO              = 0.28
 VEL_AVANCE_GIRO       = 0.06   
 KP                    = 1.2
 
-TIEMPO_GIRO_MINIMO    = 1.5
-N_LECTURAS_PROMEDIO   = 5
-TICKS_CONFIRMACION    = 4
+TIEMPO_GIRO_MINIMO       = 1.5
+N_LECTURAS_PROMEDIO      = 5
+TICKS_CONFIRMACION       = 4
+TICKS_CONFIRMAR_CALLEJON = 5  # 0.5 segundos detenido para confirmar el muro cerrado
 
 LOG_FILE = '/home/ros/Escriptori/Robotica/maze_log.txt'
 
@@ -65,10 +65,10 @@ class MazeSolver(Node):
         self.estado          = 'esperando'
         self.estado_anterior = 'esperando'
 
-        self.tiempo_inicio_giro      = 0.0
-        self.giro_comprometido       = False
-        self.ticks_fuera_pasillo     = 0
-        self.giros_fallidos_callejon = 0  
+        self.tiempo_inicio_giro  = 0.0
+        self.giro_comprometido   = False
+        self.ticks_fuera_pasillo = 0
+        self.ticks_callejon      = 0  # Sustituye a giros fallidos
 
         self.META_X               = 2.75
         self.META_Y               = 1.71
@@ -138,6 +138,7 @@ class MazeSolver(Node):
         self.buf_diag_izq.append(self.sector_min(r,  30,  60))
         self.buf_diag_der.append(self.sector_min(r, 300, 330))
         
+        # Sensores para detectar aperturas limpias a 90º
         self.d_izq_puro = min(self.clean(r[i]) for i in range(80, 100))
         self.d_der_puro = min(self.clean(r[i]) for i in range(260, 280))
 
@@ -203,45 +204,44 @@ class MazeSolver(Node):
             if en_pasillo:
                 self.ticks_fuera_pasillo = 0
                 if d_f < DIST_GIRO_PASILLO:
-                    # EVALUACIÓN ESTÁTICA ANTES DE GIRAR
-                    if d_l < DIST_LATERAL_LIBRE and d_r < DIST_LATERAL_LIBRE:
-                        self.giros_fallidos_callejon += 1
-                        if self.giros_fallidos_callejon >= MAX_GIROS_FALLIDOS:
+                    # EVALUACIÓN ESTÁTICA CON SENSORES A 90º
+                    if self.d_izq_puro < DIST_LATERAL_PURO and self.d_der_puro < DIST_LATERAL_PURO:
+                        self.ticks_callejon += 1
+                        if self.ticks_callejon >= TICKS_CONFIRMAR_CALLEJON:
                             self._cambiar_estado('retroceder', 'Callejón confirmado en pasillo')
                             self.reset_filtros()
                     else:
-                        self.giros_fallidos_callejon = 0
+                        self.ticks_callejon = 0
                         self._iniciar_giro(ahora)
             else:
                 self.ticks_fuera_pasillo += 1
                 if self.ticks_fuera_pasillo >= TICKS_CONFIRMACION:
                     self._cambiar_estado('avanzar', 'salida confirmada')
                     self.ticks_fuera_pasillo = 0
-                    self.giros_fallidos_callejon = 0
+                    self.ticks_callejon = 0
 
         elif self.estado == 'avanzar':
             if en_pasillo and d_f >= DIST_GIRO_PASILLO:
                 self._cambiar_estado('pasillo', 'pasillo detectado')
                 self.ticks_fuera_pasillo = 0
-                self.giros_fallidos_callejon = 0
+                self.ticks_callejon = 0
             elif d_f < DIST_PARAR_GIRO:
-                # EVALUACIÓN ESTÁTICA ANTES DE GIRAR
-                if d_l < DIST_LATERAL_LIBRE and d_r < DIST_LATERAL_LIBRE:
-                    self.giros_fallidos_callejon += 1
-                    if self.giros_fallidos_callejon >= MAX_GIROS_FALLIDOS:
+                # EVALUACIÓN ESTÁTICA CON SENSORES A 90º
+                if self.d_izq_puro < DIST_LATERAL_PURO and self.d_der_puro < DIST_LATERAL_PURO:
+                    self.ticks_callejon += 1
+                    if self.ticks_callejon >= TICKS_CONFIRMAR_CALLEJON:
                         self._cambiar_estado('retroceder', 'Callejón confirmado en avanzar')
                         self.reset_filtros()
                 else:
-                    self.giros_fallidos_callejon = 0
+                    self.ticks_callejon = 0
                     self._iniciar_giro(ahora)
             elif d_f >= DIST_FRENAR:
-                self.giros_fallidos_callejon = 0
+                self.ticks_callejon = 0
 
         elif self.estado == 'retroceder':
-            # NUEVO: Evaluamos d_diag_izq / d_diag_der en lugar del puro lateral.
-            # Esto asegura que el MORRO del robot también ha librado la esquina antes de pivotar.
+            # Evaluamos las diagonales para asegurar que el morro libra la pared antes de volver a girar
             if self.d_diag_izq > 0.45 or self.d_diag_der > 0.45 or self.d_back <= DIST_SEGURIDAD_TRASERA:
-                self.giros_fallidos_callejon = 0  
+                self.ticks_callejon = 0  
                 self._iniciar_giro(ahora)
 
         elif self.estado in ('girar_izq', 'girar_der'):
@@ -251,11 +251,9 @@ class MazeSolver(Node):
             else:
                 if d_f >= DIST_PARAR_GIRO + 0.10:
                     self._cambiar_estado('avanzar', f'frente libre d_f={d_f:.2f}')
-                    self.giros_fallidos_callejon = 0
+                    self.ticks_callejon = 0
                 elif d_f < DIST_PARAR_GIRO - 0.05:
-                    # Si falla en medio de un giro, JAMÁS vamos a retroceder en diagonal. 
-                    # Simplemente reintentamos el giro o buscamos el otro lado.
-                    self.giros_fallidos_callejon = 0
+                    self.ticks_callejon = 0
                     self._iniciar_giro(ahora)
 
         elif self.estado == 'escape':
@@ -266,7 +264,7 @@ class MazeSolver(Node):
         evento = ''
 
         if self.estado == 'pasillo':
-            # Frenado estático para la confirmación de callejón (no avanza mientras cuenta los MAX_GIROS)
+            # Se queda quieto automáticamente si está validando callejón
             twist.linear.x  = VEL_LINEAR_PASILLO if d_f >= DIST_GIRO_PASILLO else 0.0
             twist.angular.z = 0.0
             evento = f'pasillo_recto f={d_f:.2f}'
@@ -297,6 +295,7 @@ class MazeSolver(Node):
 
         else:  # avanzar
             vel = self.velocidad_frenada(d_f, VEL_LINEAR_NORMAL)
+            # vel ya será 0.0 si d_f < DIST_PARAR_GIRO, perfecto para evaluar en estático
             twist.linear.x = vel
             if d_r > 1.2:
                 twist.angular.z = -0.20
