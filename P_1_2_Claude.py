@@ -29,11 +29,15 @@ TIEMPO_GIRO_MINIMO  = 1.5
 N_LECTURAS_PROMEDIO = 5
 TICKS_CONFIRMACION  = 4
 
-# --- PARÁMETROS DEL RETROCESO (los únicos nuevos) ---
-# Si tras retroceder DIST_RETROCESO_OBJETIVO metros no aparece hueco lateral,
-# giramos a la fuerza hacia el lado con más espacio.
-DIST_RETROCESO_OBJETIVO = 0.25   # metros a retroceder antes del giro forzado
-DIST_SALIDA_LATERAL     = 0.32   # lateral >= esto durante retroceso → giro inmediato
+# --- PARÁMETROS ANTI-BUCLE (únicos nuevos) ---
+# Si el robot hace MAX_GIROS_SIN_AVANZAR giros consecutivos
+# y en ninguno avanza más de DIST_MIN_AVANCE metros → retroceder.
+MAX_GIROS_SIN_AVANZAR = 2      # tras 2 giros estériles → retroceder
+DIST_MIN_AVANCE       = 0.05   # metros mínimos entre inicio y fin de giro para considerarlo útil
+
+# Retroceso: distancia objetivo medida por odometría antes del giro forzado
+DIST_RETROCESO_OBJETIVO = 0.25
+DIST_SALIDA_LATERAL     = 0.32
 
 LOG_FILE = '/home/ros/Escriptori/Robotica/maze_log.txt'
 
@@ -72,7 +76,12 @@ class MazeSolver(Node):
         self.giro_comprometido   = False
         self.ticks_fuera_pasillo = 0
 
-        # Posición al inicio del retroceso (para medir distancia recorrida)
+        # --- Anti-bucle de giros estériles ---
+        self.giros_esteriles      = 0       # contador de giros sin avanzar
+        self.pos_inicio_giro_x    = 0.0    # posición al inicio de cada giro
+        self.pos_inicio_giro_y    = 0.0
+
+        # --- Retroceso por odometría ---
         self.retroceso_origen_x = 0.0
         self.retroceso_origen_y = 0.0
 
@@ -89,8 +98,9 @@ class MazeSolver(Node):
         self._log_raw('=== INICIO SESION MAZE SOLVER ===')
         self._log_raw(
             f'Params: DIST_GIRO={DIST_GIRO_PASILLO} DIST_PARAR={DIST_PARAR_GIRO} '
-            f'VEL_NORMAL={VEL_LINEAR_NORMAL} VEL_GIRO={VEL_GIRO} VEL_AVANCE_GIRO={VEL_AVANCE_GIRO} '
-            f'DIST_RETROCESO={DIST_RETROCESO_OBJETIVO} DIST_SALIDA_LAT={DIST_SALIDA_LATERAL}'
+            f'VEL_NORMAL={VEL_LINEAR_NORMAL} VEL_GIRO={VEL_GIRO} '
+            f'MAX_GIROS_SIN_AVANZAR={MAX_GIROS_SIN_AVANZAR} '
+            f'DIST_RETROCESO={DIST_RETROCESO_OBJETIVO}'
         )
         self._log_raw(
             'TSIM      | POS_X  | POS_Y  | ESTADO       | '
@@ -99,7 +109,7 @@ class MazeSolver(Node):
         self._log_raw('-' * 130)
 
     # -----------------------------------------------------------------------
-    # Logging (idéntico al original)
+    # Logging
     # -----------------------------------------------------------------------
 
     def _log_raw(self, msg):
@@ -125,7 +135,7 @@ class MazeSolver(Node):
         )
 
     # -----------------------------------------------------------------------
-    # Utilidades (idénticas al original)
+    # Utilidades
     # -----------------------------------------------------------------------
 
     def clean(self, v):
@@ -160,8 +170,15 @@ class MazeSolver(Node):
             (self.pos_y - self.retroceso_origen_y) ** 2
         )
 
+    def _dist_avanzada_en_giro(self):
+        """Distancia entre la posición actual y la posición al inicio del giro."""
+        return math.sqrt(
+            (self.pos_x - self.pos_inicio_giro_x) ** 2 +
+            (self.pos_y - self.pos_inicio_giro_y) ** 2
+        )
+
     # -----------------------------------------------------------------------
-    # Callbacks (idénticos al original)
+    # Callbacks
     # -----------------------------------------------------------------------
 
     def scan_callback(self, msg):
@@ -193,7 +210,7 @@ class MazeSolver(Node):
             self._log_evento(f'META ALCANZADA dist={dist:.3f}')
 
     # -----------------------------------------------------------------------
-    # Gestión de estados (idéntica al original)
+    # Gestión de estados
     # -----------------------------------------------------------------------
 
     def _cambiar_estado(self, nuevo, motivo=''):
@@ -218,13 +235,16 @@ class MazeSolver(Node):
     def _iniciar_giro(self, ahora):
         lado = self._decidir_lado_giro()
         self._cambiar_estado(f'girar_{lado}', f'giro lado={lado}')
-        self.tiempo_inicio_giro = ahora
-        self.giro_comprometido  = True
+        self.tiempo_inicio_giro  = ahora
+        self.giro_comprometido   = True
+        # Guardamos la posición al inicio del giro para medir si avanzamos
+        self.pos_inicio_giro_x   = self.pos_x
+        self.pos_inicio_giro_y   = self.pos_y
 
     def _iniciar_retroceso(self, motivo=''):
-        """Guarda el origen y activa el estado retroceder."""
         self._cambiar_estado('retroceder', motivo)
         self.giro_comprometido  = False
+        self.giros_esteriles    = 0
         self.retroceso_origen_x = self.pos_x
         self.retroceso_origen_y = self.pos_y
         self.reset_filtros()
@@ -296,19 +316,42 @@ class MazeSolver(Node):
             elif d_f < DIST_PARAR_GIRO:
                 self._iniciar_giro(ahora)
 
+        elif self.estado in ('girar_izq', 'girar_der'):
+            if self.giro_comprometido:
+                if tiempo_girando >= TIEMPO_GIRO_MINIMO:
+                    self.giro_comprometido = False
+            else:
+                if d_f >= DIST_PARAR_GIRO + 0.10:
+                    # Giro exitoso: el frente está libre
+                    self.giros_esteriles = 0
+                    self._cambiar_estado('avanzar', f'frente libre d_f={d_f:.2f}')
+
+                elif d_f < DIST_PARAR_GIRO - 0.05:
+                    # Frente sigue bloqueado tras el giro comprometido.
+                    # Comprobamos si el robot se ha movido durante este giro.
+                    dist_avanzada = self._dist_avanzada_en_giro()
+                    if dist_avanzada < DIST_MIN_AVANCE:
+                        # No nos hemos movido: giro estéril
+                        self.giros_esteriles += 1
+                        self._log_evento(
+                            f'GIRO ESTERIL #{self.giros_esteriles} '
+                            f'dist_avanzada={dist_avanzada:.3f}m '
+                            f'F={d_f:.2f} L={d_l:.2f} R={d_r:.2f}'
+                        )
+                        if self.giros_esteriles >= MAX_GIROS_SIN_AVANZAR:
+                            # Robot encajado → retroceder
+                            self._iniciar_retroceso(
+                                f'encajado tras {self.giros_esteriles} giros esteriles'
+                            )
+                        else:
+                            # Intentar girar al otro lado
+                            self._iniciar_giro(ahora)
+                    else:
+                        # Nos hemos movido algo: giro no estéril, seguir girando
+                        self.giros_esteriles = 0
+                        self._iniciar_giro(ahora)
+
         elif self.estado == 'retroceder':
-            # ---------------------------------------------------------------
-            # ÚNICA MEJORA RESPECTO AL ORIGINAL:
-            # Dos condiciones de salida del retroceso en lugar de una:
-            #
-            #   1. Hueco lateral inmediato  → giro inmediato (igual que antes,
-            #      pero con umbral más bajo: 0.32 en vez de 0.40)
-            #
-            #   2. Distancia objetivo por odometría alcanzada → giro forzado
-            #      hacia el lado con más espacio. Esto garantiza que el robot
-            #      SIEMPRE saldrá del retroceso aunque los laterales nunca
-            #      superen el umbral (caso del callejón muy estrecho).
-            # ---------------------------------------------------------------
             dist = self._dist_retrocedida()
 
             if self.d_left >= DIST_SALIDA_LATERAL or self.d_right >= DIST_SALIDA_LATERAL:
@@ -318,28 +361,22 @@ class MazeSolver(Node):
                     f'L={self.d_left:.2f} R={self.d_right:.2f} dist={dist:.3f}m'
                 )
                 self._cambiar_estado(f'girar_{lado}', f'salida lateral -> {lado}')
-                self.tiempo_inicio_giro = ahora
-                self.giro_comprometido  = True
+                self.tiempo_inicio_giro  = ahora
+                self.pos_inicio_giro_x   = self.pos_x
+                self.pos_inicio_giro_y   = self.pos_y
+                self.giro_comprometido   = True
 
             elif dist >= DIST_RETROCESO_OBJETIVO:
                 lado = 'izq' if self.d_left >= self.d_right else 'der'
                 self._log_evento(
-                    f'OBJETIVO RETROCESO ALCANZADO {dist:.3f}m >= {DIST_RETROCESO_OBJETIVO}m '
+                    f'OBJETIVO RETROCESO {dist:.3f}m >= {DIST_RETROCESO_OBJETIVO}m '
                     f'→ giro forzado {lado} L={self.d_left:.2f} R={self.d_right:.2f}'
                 )
-                self._cambiar_estado(f'girar_{lado}', f'giro forzado tras retroceso -> {lado}')
-                self.tiempo_inicio_giro = ahora
-                self.giro_comprometido  = True
-
-        elif self.estado in ('girar_izq', 'girar_der'):
-            if self.giro_comprometido:
-                if tiempo_girando >= TIEMPO_GIRO_MINIMO:
-                    self.giro_comprometido = False
-            else:
-                if d_f >= DIST_PARAR_GIRO + 0.10:
-                    self._cambiar_estado('avanzar', f'frente libre d_f={d_f:.2f}')
-                elif d_f < DIST_PARAR_GIRO - 0.05:
-                    self._iniciar_giro(ahora)
+                self._cambiar_estado(f'girar_{lado}', f'giro forzado -> {lado}')
+                self.tiempo_inicio_giro  = ahora
+                self.pos_inicio_giro_x   = self.pos_x
+                self.pos_inicio_giro_y   = self.pos_y
+                self.giro_comprometido   = True
 
         elif self.estado == 'escape':
             if d_f > DIST_PARAR_GIRO:
