@@ -199,18 +199,17 @@ class MazeSolver(Node):
         tiempo_girando = ahora - self.tiempo_inicio_giro
         en_pasillo     = (d_r < DIST_PASILLO and d_l < DIST_PASILLO)
 
-        # --- LÓGICA DE DETECCIÓN DE CALLEJÓN (CONFIRMACIÓN) ---
-        if self.estado in ('avanzar', 'pasillo'):
-            # Si frente, izquierda y derecha están bloqueados
-            if d_f <= 0.25 and d_l < 0.35 and d_r < 0.35:
-                self.ticks_callejon += 1
-            else:
-                self.ticks_callejon = 0
-            
+        # --- LÓGICA DE DETECCIÓN DE CALLEJÓN (AHORA GLOBAL) ---
+        # Ahora se ejecuta siempre, incluso si está girando.
+        # Si está en un callejón, el retroceso tiene prioridad absoluta sobre cualquier giro.
+        if d_f <= 0.25 and d_l < 0.35 and d_r < 0.35:
+            self.ticks_callejon += 1
             if self.ticks_callejon >= TICKS_CONFIRMAR_CALLEJON:
-                self._cambiar_estado('retroceder', 'callejón confirmado')
+                self._cambiar_estado('retroceder', 'callejón confirmado globalmente')
                 self.giro_comprometido = False
                 self.reset_filtros()
+        else:
+            self.ticks_callejon = 0
 
         # --- MÁQUINA DE ESTADOS ---
         if self.estado == 'pasillo':
@@ -244,10 +243,13 @@ class MazeSolver(Node):
                 if tiempo_girando >= TIEMPO_GIRO_MINIMO:
                     self.giro_comprometido = False
             else:
+                # Si estamos girando pero el frente se abre, dejamos de girar
                 if d_f >= DIST_PARAR_GIRO + 0.10:
                     self._cambiar_estado('avanzar', 'frente libre')
+                # Si el frente sigue cerrado y no estamos en callejón (la lógica global arriba lo detectará)
+                # podemos reintentar giro si hace falta, pero ahora tenemos la protección global.
                 elif d_f < DIST_PARAR_GIRO - 0.05:
-                    self._iniciar_giro(ahora)
+                     self._iniciar_giro(ahora)
 
         # --- APLICACIÓN DE VELOCIDADES ---
         evento = ''
@@ -262,7 +264,7 @@ class MazeSolver(Node):
             else:
                 twist.linear.x = 0.0
                 evento = 'retroceso_parado'
-            twist.angular.z = 0.0  # Mantenemos recta pura
+            twist.angular.z = 0.0 
             
         elif self.estado == 'girar_izq':
             twist.linear.x  = VEL_AVANCE_GIRO if d_f > 0.22 else 0.0
