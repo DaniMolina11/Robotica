@@ -267,8 +267,17 @@ class MazeSolver(Node):
 
         elif self.estado in ('girar_izq', 'girar_der'):
             if self.giro_comprometido:
-                if tiempo_girando >= TIEMPO_GIRO_MINIMO:
+                # Verificar distancias laterales para evitar colisiones durante el giro
+                if self.d_left < DIST_PASILLO or self.d_right < DIST_PASILLO:
+                    self._log_evento('Ajustando giro: pared lateral detectada')
+                    twist.linear.x = 0.0  # Detener avance lineal
+                    twist.angular.z = 0.0  # Pausar giro angular
+                elif tiempo_girando >= TIEMPO_GIRO_MINIMO:
                     self.giro_comprometido = False
+                else:
+                    # Mantener giro angular constante
+                    twist.linear.x = 0.0
+                    twist.angular.z = VEL_GIRO if self.estado == 'girar_izq' else -VEL_GIRO
             else:
                 if d_f >= DIST_PARAR_GIRO + 0.10:
                     self._cambiar_estado('avanzar', f'frente libre d_f={d_f:.2f}')
