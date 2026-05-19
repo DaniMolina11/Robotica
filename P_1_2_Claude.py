@@ -9,13 +9,15 @@ import math
 import time
 from collections import deque
 
-# --- PARÁMETROS DE TU CÓDIGO ORIGINAL ---
+# --- PARÁMETROS DE TU CÓDIGO ORIGINAL Y NUEVOS ---
 DIST_GIRO_PASILLO      = 0.32   
 DIST_PARAR_GIRO        = 0.32
 DIST_FRENAR            = 0.55   
 DIST_PARED_DERECHA     = 0.25   
 DIST_PASILLO           = 0.45   
 DIST_SEGURIDAD_TRASERA = 0.15   
+DIST_LATERAL_LIBRE     = 0.38  # NUEVO: umbral para considerar un lateral abierto
+MAX_GIROS_FALLIDOS     = 2     # NUEVO: número de ciclos de giro bloqueados para confirmar callejón
 
 VEL_LINEAR_PASILLO    = 0.06
 VEL_LINEAR_NORMAL     = 0.08
@@ -67,6 +69,7 @@ class MazeSolver(Node):
         self.tiempo_inicio_giro      = 0.0
         self.giro_comprometido       = False
         self.ticks_fuera_pasillo     = 0
+        self.giros_fallidos_callejon = 0  # NUEVO: Rastreador de giros sin salida exitosa
 
         self.META_X               = 2.75
         self.META_Y               = 1.71
@@ -219,57 +222,85 @@ class MazeSolver(Node):
         tiempo_girando = ahora - self.tiempo_inicio_giro
         en_pasillo     = (d_r < DIST_PASILLO and d_l < DIST_PASILLO)
 
-        # --- MÁQUINA DE ESTADOS SECUENCIAL (TU LÓGICA) ---
+        # --- MÁQUINA DE ESTADOS SECUENCIAL ---
         if self.estado == 'pasillo':
             if en_pasillo:
                 self.ticks_fuera_pasillo = 0
                 if d_f < DIST_GIRO_PASILLO:
-                    # LÓGICA INFALIBLE: Miramos los laterales puros para saber si hay camino.
-                    # Si ambos laterales miden menos del ancho de un pasillo, es que están tapiados.
-                    if self.d_izq_puro < 0.45 and self.d_der_puro < 0.45:
-                        self._cambiar_estado('retroceder', 'No hay camino, callejon real detectado.')
+                    # CLASIFICACIÓN PREVIA: evaluamos con los laterales promediados reales
+                    if d_l < DIST_LATERAL_LIBRE and d_r < DIST_LATERAL_LIBRE:
+                        self.giros_fallidos_callejon += 1
+                        self._log_evento(f'Callejón potencial detectado en pasillo. Intentos={self.giros_fallidos_callejon}')
+                    else:
+                        self.giros_fallidos_callejon = 0
+
+                    if self.giros_fallidos_callejon >= MAX_GIROS_FALLIDOS:
+                        self._cambiar_estado('retroceder', 'Callejón real confirmado por límite de intentos')
                         self.reset_filtros()
                     else:
-                        # Si hay camino, ejecuta tu giro de siempre
                         self._iniciar_giro(ahora)
             else:
                 self.ticks_fuera_pasillo += 1
                 if self.ticks_fuera_pasillo >= TICKS_CONFIRMACION:
                     self._cambiar_estado('avanzar', 'salida pasillo confirmada')
                     self.ticks_fuera_pasillo = 0
+                    self.giros_fallidos_callejon = 0
 
         elif self.estado == 'avanzar':
             if en_pasillo and d_f >= DIST_GIRO_PASILLO:
                 self._cambiar_estado('pasillo', 'pasillo detectado')
                 self.ticks_fuera_pasillo = 0
+                self.giros_fallidos_callejon = 0
             elif d_f < DIST_PARAR_GIRO:
-                # LÓGICA INFALIBLE: Miramos los laterales puros para saber si hay camino.
-                if self.d_izq_puro < 0.45 and self.d_der_puro < 0.45:
-                    self._cambiar_estado('retroceder', 'No hay camino, callejon real detectado.')
+                # CLASIFICACIÓN PREVIA: evaluamos con los laterales promediados reales
+                if d_l < DIST_LATERAL_LIBRE and d_r < DIST_LATERAL_LIBRE:
+                    self.giros_fallidos_callejon += 1
+                    self._log_evento(f'Callejón potencial detectado en avanzar. Intentos={self.giros_fallidos_callejon}')
+                else:
+                    self.giros_fallidos_callejon = 0
+
+                if self.giros_fallidos_callejon >= MAX_GIROS_FALLIDOS:
+                    self._cambiar_estado('retroceder', 'Callejón real confirmado por límite de intentos')
                     self.reset_filtros()
                 else:
-                    # Si hay camino, ejecuta tu giro de siempre
                     self._iniciar_giro(ahora)
+            elif d_f >= DIST_FRENAR:
+                # Si el camino se despeja completamente hacia adelante mientras avanza, limpiamos el contador
+                self.giros_fallidos_callejon = 0
 
         elif self.estado == 'retroceder':
-            # Vamos marcha atrás hasta que un lado se abra o rocemós el culo por seguridad
+            # Vamos marcha atrás hasta que un lado se abra o rocemos el culo por seguridad
             if self.d_izq_puro > 0.45 or self.d_der_puro > 0.45 or self.d_back <= DIST_SEGURIDAD_TRASERA:
+                self.giros_fallidos_callejon = 0  # Reseteo obligatorio al encontrar salida limpia
                 self._iniciar_giro(ahora)
 
         elif self.estado in ('girar_izq', 'girar_der'):
-            # TUS GIROS ORIGINALES INTACTOS. Cero marchas atrás aquí.
             if self.giro_comprometido:
                 if tiempo_girando >= TIEMPO_GIRO_MINIMO:
                     self.giro_comprometido = False
             else:
                 if d_f >= DIST_PARAR_GIRO + 0.10:
                     self._cambiar_estado('avanzar', f'frente libre d_f={d_f:.2f}')
+                    self.giros_fallidos_callejon = 0
                 elif d_f < DIST_PARAR_GIRO - 0.05:
-                    self._iniciar_giro(ahora)
+                    # El frente sigue obstruido tras cumplir el tiempo mínimo de giro
+                    # CLASIFICACIÓN PREVIA: evaluamos laterales antes de encadenar otro giro
+                    if d_l < DIST_LATERAL_LIBRE and d_r < DIST_LATERAL_LIBRE:
+                        self.giros_fallidos_callejon += 1
+                        self._log_evento(f'Giro fallido. El callejón persiste. Intentos={self.giros_fallidos_callejon}')
+                    else:
+                        self.giros_fallidos_callejon = 0
+
+                    if self.giros_fallidos_callejon >= MAX_GIROS_FALLIDOS:
+                        self._cambiar_estado('retroceder', 'Callejón confirmado tras giros fallidos consecutivos')
+                        self.reset_filtros()
+                    else:
+                        self._iniciar_giro(ahora)
 
         elif self.estado == 'escape':
             if d_f > DIST_PARAR_GIRO:
                 self._cambiar_estado('avanzar', 'escape completado')
+                self.giros_fallidos_callejon = 0
 
         # --- APLICACIÓN DE VELOCIDADES ORIGINALES ---
         evento = ''
@@ -286,7 +317,7 @@ class MazeSolver(Node):
             else:
                 twist.linear.x = 0.0
                 evento = f'retroceso_parado B={self.d_back:.2f}'
-            twist.angular.z = 0.0 # Marcha atrás limpia y recta obligatoria
+            twist.angular.z = 0.0 
 
         elif self.estado == 'escape':
             twist.linear.x  = -0.05
@@ -303,7 +334,7 @@ class MazeSolver(Node):
             twist.angular.z = -VEL_GIRO
             evento = f'girar_der arco={twist.linear.x > 0} t={tiempo_girando:.1f}s'
 
-        else:  # avanzar (CON TU LÓGICA DE PARED DERECHA)
+        else:  # avanzar
             vel = self.velocidad_frenada(d_f, VEL_LINEAR_NORMAL)
             twist.linear.x = vel
             if d_r > 1.2:
