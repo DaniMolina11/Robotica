@@ -9,16 +9,18 @@ import math
 import time
 from collections import deque
 
-# --- PARÁMETROS ---
-DIST_GIRO_PASILLO      = 0.32   
-DIST_PARAR_GIRO        = 0.32
+# --- PARÁMETROS DE NAVEGACIÓN ---
+DIST_GIRO_PASILLO      = 0.22   # Aproximación al muro para detectar mejor los cruces
+DIST_PARAR_GIRO        = 0.22   
 DIST_FRENAR            = 0.55   
 DIST_PARED_DERECHA     = 0.25   
 DIST_PASILLO           = 0.45   
 DIST_SEGURIDAD_TRASERA = 0.15   
+DIST_LATERAL_SEGURIDAD = 0.18   # Distancia crítica para reducir giro
 
-# NUEVO: Tiempo/ticks para confirmar callejón
-TICKS_CONFIRMAR_CALLEJON = 6   
+# UMBRALES DE HUECO
+DIST_LATERAL_PURO      = 0.45  
+TICKS_CONFIRMAR_CALLEJON = 6    # Tiempo de espera (0.6s) para confirmar callejón
 
 VEL_LINEAR_PASILLO    = 0.06
 VEL_LINEAR_NORMAL     = 0.08
@@ -27,10 +29,7 @@ VEL_GIRO              = 0.28
 VEL_AVANCE_GIRO       = 0.06   
 KP                    = 1.2
 
-TIEMPO_GIRO_MINIMO    = 1.5
 N_LECTURAS_PROMEDIO   = 5
-TICKS_CONFIRMACION    = 4
-
 LOG_FILE = '/home/ros/Escriptori/Robotica/maze_log.txt'
 
 class MazeSolver(Node):
@@ -46,15 +45,9 @@ class MazeSolver(Node):
         self.buf_right    = deque(maxlen=N_LECTURAS_PROMEDIO)
         self.buf_left     = deque(maxlen=N_LECTURAS_PROMEDIO)
         self.buf_back     = deque(maxlen=N_LECTURAS_PROMEDIO)
-        self.buf_diag_izq = deque(maxlen=N_LECTURAS_PROMEDIO)
-        self.buf_diag_der = deque(maxlen=N_LECTURAS_PROMEDIO)
 
-        self.d_front    = 3.0
-        self.d_right    = 3.0
-        self.d_left     = 3.0
-        self.d_back     = 3.0
-        self.d_diag_izq = 3.0
-        self.d_diag_der = 3.0
+        self.d_front = self.d_right = self.d_left = self.d_back = 3.0
+        self.d_izq_puro = self.d_der_puro = 3.0
 
         self.lecturas_acumuladas = 0
         self.estado              = 'esperando'
@@ -70,9 +63,6 @@ class MazeSolver(Node):
         self.log_file.write(f'[{ts}] {msg}\n')
         self.log_file.flush()
 
-    def _log_tick(self, evento=''):
-        self._log_raw(f'{self.estado:<13} | F:{self.d_front:5.2f} R:{self.d_right:5.2f} L:{self.d_left:5.2f} | {evento}')
-
     def clean(self, v):
         return 3.0 if (math.isinf(v) or math.isnan(v)) else float(v)
 
@@ -82,38 +72,27 @@ class MazeSolver(Node):
     def promedio(self, buf):
         return sum(buf) / len(buf) if buf else 3.0
 
-    def reset_filtros(self):
-        self.buf_front.clear()
-        self.buf_right.clear()
-        self.buf_left.clear()
-        self.buf_diag_izq.clear()
-        self.buf_diag_der.clear()
-        self.lecturas_acumuladas = 0
-
-    def velocidad_frenada(self, d_front, vel_max):
-        if d_front >= DIST_FRENAR: return vel_max
-        if d_front <= DIST_PARAR_GIRO: return 0.0
-        return round(vel_max * ((d_front - DIST_PARAR_GIRO) / (DIST_FRENAR - DIST_PARAR_GIRO)), 3)
-
     def scan_callback(self, msg):
         r = msg.ranges
         self.buf_front.append(min(self.sector_min(r, 350, 360), self.sector_min(r, 0, 10)))
         self.buf_right.append(self.sector_min(r, 260, 310))
         self.buf_left.append(self.sector_min(r, 50, 110))
         self.buf_back.append(self.sector_min(r, 170, 190))
-        self.buf_diag_izq.append(self.sector_min(r, 30, 60))
-        self.buf_diag_der.append(self.sector_min(r, 300, 330))
+        
+        # Visión de reojo para anticipar cruces
+        self.d_izq_puro = min(self.clean(r[i]) for i in range(70, 95))
+        self.d_der_puro = min(self.clean(r[i]) for i in range(265, 290))
+
         self.lecturas_acumuladas += 1
-        self.d_front, self.d_right, self.d_left = self.promedio(self.buf_front), self.promedio(self.buf_right), self.promedio(self.buf_left)
-        self.d_back, self.d_diag_izq, self.d_diag_der = self.promedio(self.buf_back), self.promedio(self.buf_diag_izq), self.promedio(self.buf_diag_der)
+        self.d_front = self.promedio(self.buf_front)
+        self.d_right = self.promedio(self.buf_right)
+        self.d_left  = self.promedio(self.buf_left)
+        self.d_back  = self.promedio(self.buf_back)
 
     def _cambiar_estado(self, nuevo):
         if nuevo != self.estado:
             self._log_raw(f'>>> CAMBIO ESTADO: {self.estado} -> {nuevo}')
             self.estado = nuevo
-
-    def _decidir_lado_giro(self):
-        return 'izq' if self.d_diag_izq >= self.d_diag_der else 'der'
 
     def control_loop(self):
         twist = Twist()
@@ -123,24 +102,24 @@ class MazeSolver(Node):
 
         ahora = time.time()
         
-        # 1. DETECCIÓN DE CALLEJÓN (GATED: Solo actúa si NO está girando)
+        # --- 1. DETECCIÓN DE CALLEJÓN (GATED) ---
+        # Solo se activa si el robot intenta avanzar. Se ignora mientras gira.
         if self.estado in ('avanzar', 'pasillo'):
             if self.d_front <= 0.25 and self.d_left < 0.35 and self.d_right < 0.35:
                 self.ticks_callejon += 1
                 if self.ticks_callejon >= TICKS_CONFIRMAR_CALLEJON:
                     self._cambiar_estado('retroceder')
-                    self.reset_filtros()
             else:
                 self.ticks_callejon = 0
         else:
-            self.ticks_callejon = 0 # Reiniciar contador mientras gira o retrocede
+            self.ticks_callejon = 0 
 
-        # 2. MÁQUINA DE ESTADOS
+        # --- 2. MÁQUINA DE ESTADOS ---
         if self.estado == 'esperando': self._cambiar_estado('avanzar')
 
         elif self.estado == 'avanzar':
             if self.d_front < DIST_PARAR_GIRO:
-                lado = self._decidir_lado_giro()
+                lado = 'izq' if self.d_left >= self.d_right else 'der'
                 self._cambiar_estado(f'girar_{lado}')
                 self.tiempo_inicio_giro = ahora
                 self.giro_comprometido = True
@@ -153,29 +132,37 @@ class MazeSolver(Node):
                 self.giro_comprometido = True
 
         elif self.estado in ('girar_izq', 'girar_der'):
-            if self.giro_comprometido and (ahora - self.tiempo_inicio_giro) < TIEMPO_GIRO_MINIMO:
-                pass
-            elif self.d_front >= DIST_PARAR_GIRO + 0.10:
-                self._cambiar_estado('avanzar')
-            else:
-                self.giro_comprometido = False
+            # Permite completar el giro mínimo
+            if (ahora - self.tiempo_inicio_giro) > 1.5:
+                if self.d_front >= DIST_PARAR_GIRO + 0.10:
+                    self._cambiar_estado('avanzar')
 
-        # 3. ACCIONES
+        # --- 3. ACCIONES Y CONTROL DE SEGURIDAD ---
         if self.estado == 'retroceder':
             twist.linear.x = -VEL_RETROCESO if self.d_back > DIST_SEGURIDAD_TRASERA else 0.0
+            
         elif self.estado == 'girar_izq':
-            twist.angular.z = VEL_GIRO
+            # Control de seguridad lateral durante el giro
+            twist.angular.z = VEL_GIRO if self.d_left > DIST_LATERAL_SEGURIDAD else VEL_GIRO * 0.5
             twist.linear.x = VEL_AVANCE_GIRO if self.d_front > 0.22 else 0.0
+            
         elif self.estado == 'girar_der':
-            twist.angular.z = -VEL_GIRO
+            # Control de seguridad lateral durante el giro
+            twist.angular.z = -VEL_GIRO if self.d_right > DIST_LATERAL_SEGURIDAD else -VEL_GIRO * 0.5
             twist.linear.x = VEL_AVANCE_GIRO if self.d_front > 0.22 else 0.0
-        else: # avanzar
+            
+        else: # avanzar / pasillo
             twist.linear.x = self.velocidad_frenada(self.d_front, VEL_LINEAR_NORMAL)
+            # PD simple para seguir pared derecha
             error = DIST_PARED_DERECHA - self.d_right
             twist.angular.z = max(min(KP * error, 0.40), -0.40)
 
         self.cmd_pub.publish(twist)
-        self._log_tick(f"TicksCal:{self.ticks_callejon}")
+
+    def velocidad_frenada(self, d_front, vel_max):
+        if d_front >= DIST_FRENAR: return vel_max
+        if d_front <= DIST_PARAR_GIRO: return 0.0
+        return round(vel_max * ((d_front - DIST_PARAR_GIRO) / (DIST_FRENAR - DIST_PARAR_GIRO)), 3)
 
 def main(args=None):
     rclpy.init(args=args)
