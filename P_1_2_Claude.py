@@ -9,31 +9,31 @@ import math
 import time
 from collections import deque
 
-# --- PARÁMETROS AJUSTADOS A PASILLOS DE 30-35 CM ---
-DIST_PASILLO           = 0.25   # Si ambos lados < 0.25m, estamos en pasillo estrecho
-DIST_PARED_DERECHA     = 0.16   # El centro ideal en un pasillo de ~32cm
-DIST_GIRO_PASILLO      = 0.25   # Distancia al frente para actuar en pasillo
-DIST_PARAR_GIRO        = 0.25   
+# --- PARÁMETROS ADUSTADOS A PASILLOS DE 30-35 CM ---
+DIST_PASILLO           = 0.25   # Ambos lados por debajo de esto = Pasillo
+DIST_PARED_DERECHA     = 0.16   # Centro ideal en pasillo de ~32cm
+DIST_GIRO_PASILLO      = 0.23   # Distancia al frente para actuar
+DIST_PARAR_GIRO        = 0.23   
 
 # Umbrales estrictos para callejón sin salida
 CALLEJON_FRONT         = 0.24
 CALLEJON_LATERAL       = 0.22
 
-# VELOCIDADES MUY REDUCIDAS (Máxima precisión y calma)
+# VELOCIDADES DE PRECISIÓN (Movimiento controlado)
 VEL_LINEAR_PASILLO    = 0.03   
 VEL_LINEAR_NORMAL     = 0.04   
 VEL_AVANCE_GIRO       = 0.01   
 VEL_GIRO              = 0.18   
 
-# CONSTANTES DEL CONTROLADOR PID (Prioridad Máxima en Pasillo)
-KP_PASILLO            = 2.8    
-KI_PASILLO            = 0.1    
-KD_PASILLO            = 1.2    
+# PID AGRESIVO Y PRIORITARIO PARA PASILLO
+KP_PASILLO            = 3.5    # Alta prioridad para corregir al instante
+KI_PASILLO            = 0.05   
+KD_PASILLO            = 1.5    # Amortigua el giro para evitar que se pase de largo
 
 KP_NORMAL             = 1.5    
 
-# --- CONSTANTES DE TIEMPO Y FILTROS (REPARADO) ---
-TIEMPO_GIRO_MINIMO    = 1.5    # <-- Aquí está la constante que faltaba
+# CONSTANTES DE TIEMPO Y FILTROS
+TIEMPO_GIRO_MINIMO    = 1.5    
 N_LECTURAS_PROMEDIO   = 5
 TICKS_CONFIRMACION    = 3
 
@@ -64,7 +64,6 @@ class MazeSolver(Node):
         self.yaw_inicial = 0.0
         self.lecturas_acumuladas = 0
 
-        # Variables de memoria para el PID
         self.error_anterior_pasillo = 0.0
         self.integral_pasillo       = 0.0
 
@@ -80,7 +79,7 @@ class MazeSolver(Node):
         self.sim_time             = 0.0
 
         self.log_file = open(LOG_FILE, 'w')
-        self._log_raw('=== INICIO SESION MAZE SOLVER PID ===')
+        self._log_raw('=== INICIO SESION RANGOS MINIMOS PID ===')
 
     def _log_raw(self, msg):
         ts = time.strftime('%H:%M:%S')
@@ -114,10 +113,15 @@ class MazeSolver(Node):
         r = msg.ranges
         if len(r) < 360:
             return
+        
+        # Frente y atrás se mantienen estables
         self.buf_front.append(min(self.sector_min(r, 350, 360), self.sector_min(r, 0, 10)))
-        self.buf_right.append(   self.sector_min(r, 260, 280)) 
-        self.buf_left.append(    self.sector_min(r,  80, 100)) 
-        self.buf_back.append(    self.sector_min(r, 170, 190))
+        self.buf_back.append(self.sector_min(r, 170, 190))
+        
+        # NUEVA LÓGICA DE RANGOS AMPLIOS: Buscamos el punto más cercano de la pared lateral
+        # Al quedarnos con el mínimo de un abanico de 60 grados, solucionamos el problema del robot girado
+        self.buf_left.append(self.sector_min(r, 60, 120))    # Rango izquierdo amplio (90° +/- 30°)
+        self.buf_right.append(self.sector_min(r, 240, 300))  # Rango derecho amplio (270° +/- 30°)
         
         self.lecturas_acumuladas += 1
         self.d_front = self.promedio(self.buf_front)
@@ -145,6 +149,7 @@ class MazeSolver(Node):
             self.estado = nuevo
 
     def _decidir_lado_giro(self):
+        # Usamos los mínimos reales calculados para saber qué lado está verdaderamente abierto
         if self.d_right > 0.35: 
             lado = 'der' 
         elif self.d_left > 0.35: 
@@ -199,11 +204,11 @@ class MazeSolver(Node):
                 self.ticks_fuera_pasillo += 1
                 if self.ticks_fuera_pasillo >= TICKS_CONFIRMACION:
                     if d_r > DIST_PASILLO:
-                        self._cambiar_estado('girar_der', 'El pasillo se abre a la derecha')
+                        self._cambiar_estado('girar_der', 'Abertura derecha detectada')
                         self.tiempo_inicio_giro = ahora
                         self.giro_comprometido = True
                     elif d_l > DIST_PASILLO:
-                        self._cambiar_estado('girar_izq', 'El pasillo se abre a la izquierda')
+                        self._cambiar_estado('girar_izq', 'Abertura izquierda detectada')
                         self.tiempo_inicio_giro = ahora
                         self.giro_comprometido = True
                     else:
@@ -218,7 +223,7 @@ class MazeSolver(Node):
                 self.ticks_fuera_pasillo = 0
             elif d_f < DIST_PARAR_GIRO:
                 self._iniciar_giro(ahora)
-            elif d_r > 0.40 and d_f > 0.30: 
+            elif d_r > 0.38 and d_f > 0.30: 
                 self._cambiar_estado('girar_der', 'Muro derecho termina')
                 self.tiempo_inicio_giro = ahora
                 self.giro_comprometido = True
@@ -242,20 +247,23 @@ class MazeSolver(Node):
             elif tiempo_girando > 8.0 and d_f > 0.35:
                 self._cambiar_estado('avanzar', 'Giro 180 abortado')
 
-        # --- APLICACIÓN DE VELOCIDADES ---
+        # --- APLICACIÓN DE VELOCIDADES Y CONTROLADOR ---
         evento = ''
         if self.estado == 'pasillo':
+            # PRIORIDAD MÁXIMA: Error basado en los mínimos absolutos detectados en los rangos
+            # Si d_l es grande y d_r es pequeño -> error positivo -> gira a la izquierda (+) para alejarse de la derecha
             error = d_l - d_r  
+            
             self.integral_pasillo += error * 0.1
-            self.integral_pasillo = max(min(self.integral_pasillo, 0.15), -0.15)
+            self.integral_pasillo = max(min(self.integral_pasillo, 0.10), -0.10)
             derivada = (error - self.error_anterior_pasillo) / 0.1
             self.error_anterior_pasillo = error
             
             salida_pid = (KP_PASILLO * error) + (KI_PASILLO * self.integral_pasillo) + (KD_PASILLO * derivada)
             
             twist.linear.x  = VEL_LINEAR_PASILLO
-            twist.angular.z = max(min(salida_pid, 0.38), -0.38) 
-            evento = f'PID_PASILLO err={error:+.3f}'
+            twist.angular.z = max(min(salida_pid, 0.40), -0.40) 
+            evento = f'PID_RANGOS err={error:+.3f} u={twist.angular.z:+.3f}'
             
         elif self.estado == 'girar_180':
             twist.linear.x  = 0.0
@@ -273,7 +281,7 @@ class MazeSolver(Node):
             evento = 'Curva Derecha'
             
         else:  
-            if d_r > 0.50:
+            if d_r > 0.45:
                 twist.linear.x  = VEL_LINEAR_NORMAL
                 twist.angular.z = -0.12 
                 evento = 'Buscando muro'
