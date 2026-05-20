@@ -214,11 +214,12 @@ class MazeSolver(Node):
 
         # --- REGLA PROTEGIDA EN LÍNEA RECTA ---
         if self.estado in ('avanzar', 'pasillo'):
+            # Ajustado a 0.24 para capturar el callejón con suficiente margen
             callejon_muerto = (d_f <= 0.24 and d_l < 0.30 and d_r < 0.30)
             if callejon_muerto:
                 self._cambiar_estado('retroceder', 'callejon detectado (frente y laterales bloqueados)')
                 self.giro_comprometido = False
-                self.reset_filtros()  
+                self.reset_filtros()  # NUEVO: Vaciamos los buffers antiguos para que el láser responda al milisegundo
                 return
 
         if self.estado in ('avanzar', 'pasillo'):
@@ -251,7 +252,7 @@ class MazeSolver(Node):
                 self._iniciar_giro(ahora)
 
         elif self.estado == 'retroceder':
-            # BLINDAJE: Solo miramos los laterales puros (d_left y d_right), las diagonales no existen aquí
+            # Buscamos la salida del callejón basándonos en datos instantáneos limpios
             if self.d_left > 0.40 or self.d_right > 0.40:
                 lado = 'izq' if self.d_left > self.d_right else 'der'
                 self._cambiar_estado(f'girar_{lado}', f'salida trasera encontrada hacia {lado}')
@@ -284,7 +285,8 @@ class MazeSolver(Node):
                 twist.linear.x = -VEL_RETROCESO
             else:
                 twist.linear.x = 0.0
-            # Marcha atrás perfectamente recta para que no intente girar usando diagonales falsas
+            # NUEVO: Bloqueamos el giro angular a 0.0 de forma estricta.
+            # Al no balancear las ruedas de lado a lado con retardos, el robot clava una línea recta perfecta.
             twist.angular.z = 0.0  
             evento = f'retrocediendo_recto_puro B={self.d_back:.2f}'
             
