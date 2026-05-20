@@ -218,6 +218,7 @@ class MazeSolver(Node):
         
         # Si estamos en el estado bloqueante de giro 180, IGNORAMOS las reglas normales de pasillo
         if self.estado == 'giro_180':
+            self.giro_comprometido = False
             # Tiempo matemático de bloqueo: 180 grados a 0.28 rad/s = 5.6 segundos
             if tiempo_girando >= 5.6:
                 self._cambiar_estado('avanzar', 'Giro completo de 180 grados terminado con exito')
