@@ -9,21 +9,24 @@ import math
 import time
 from collections import deque
 
-# --- PARÁMETROS DE TU CÓDIGO ORIGINAL ---
+# --- PARÁMETROS DE LA PRÁCTICA ---
 DIST_GIRO_PASILLO      = 0.32   
 DIST_PARAR_GIRO        = 0.32
 DIST_FRENAR            = 0.55   
 DIST_PARED_DERECHA     = 0.25   
 DIST_PASILLO           = 0.45   
-DIST_ESQUINA_CERRADA   = 0.20   
 DIST_SEGURIDAD_TRASERA = 0.15   
+
+# Umbrales para detección estricta de callejón sin salida
+CALLEJON_FRONT         = 0.30
+CALLEJON_LATERAL       = 0.35
 
 VEL_LINEAR_PASILLO    = 0.06
 VEL_LINEAR_NORMAL     = 0.08
-VEL_RETROCESO         = 0.05
-VEL_GIRO              = 0.28   
+VEL_GIRO              = 0.35   # Un poco más rápido para limpiar el callejón con soltura
 VEL_AVANCE_GIRO       = 0.06   
 KP                    = 1.2
+KP_PASILLO            = 1.5    # Ganancia proporcional para el centrado del pasillo
 
 TIEMPO_GIRO_MINIMO    = 1.5
 N_LECTURAS_PROMEDIO   = 5
@@ -56,6 +59,8 @@ class MazeSolver(Node):
 
         self.pos_x = 0.0
         self.pos_y = 0.0
+        self.yaw   = 0.0
+        self.yaw_inicial = 0.0
         self.lecturas_acumuladas = 0
 
         self.estado          = 'esperando'
@@ -78,7 +83,7 @@ class MazeSolver(Node):
         self._log_raw('=== INICIO SESION MAZE SOLVER ===')
         self._log_raw(
             f'Params: DIST_GIRO={DIST_GIRO_PASILLO} DIST_PARAR={DIST_PARAR_GIRO} '
-            f'VEL_NORMAL={VEL_LINEAR_NORMAL} VEL_GIRO={VEL_GIRO} VEL_AVANCE_GIRO={VEL_AVANCE_GIRO}'
+            f'VEL_NORMAL={VEL_LINEAR_NORMAL} VEL_GIRO={VEL_GIRO}'
         )
         self._log_raw(
             'TSIM      | POS_X  | POS_Y  | ESTADO       | '
@@ -157,6 +162,13 @@ class MazeSolver(Node):
     def odom_callback(self, msg):
         self.pos_x = msg.pose.pose.position.x
         self.pos_y = msg.pose.pose.position.y
+        
+        # Conversión de Cuaternión a Yaw (Ángulo Z en radianes)
+        q = msg.pose.pose.orientation
+        siny_cosp = 2.0 * (q.w * q.z + q.x * q.y)
+        cosy_cosp = 1.0 - 2.0 * (q.y * q.y + q.z * q.z)
+        self.yaw = math.atan2(siny_cosp, cosy_cosp)
+        
         dist = math.sqrt((self.pos_x - self.META_X)**2 + (self.pos_y - self.META_Y)**2)
         if dist < self.DISTANCIA_MINIMA_META and not self.meta_alcanzada:
             self.meta_alcanzada = True
@@ -169,16 +181,15 @@ class MazeSolver(Node):
             self.estado = nuevo
 
     def _decidir_lado_giro(self):
-        en_pasillo = (self.d_right < DIST_PASILLO and self.d_left < DIST_PASILLO)
-        if en_pasillo:
-            lado = 'izq' if self.d_diag_izq >= self.d_diag_der else 'der'
-            self._log_evento(
-                f'Giro en PASILLO por diagonal: lado={lado} '
-                f'DI={self.d_diag_izq:.2f} DD={self.d_diag_der:.2f}'
-            )
+        # REQUERIMIENTO 1: Prioridad estricta al giro a la derecha si no está completamente bloqueado
+        if self.d_right >= 0.30 or self.d_diag_der >= 0.30:
+            lado = 'der'
+            self._log_evento(f'Giro decidido por PRIORIDAD DERECHA: lado={lado}')
+        elif self.d_left >= 0.30 or self.d_diag_izq >= 0.30:
+            lado = 'izq'
+            self._log_evento(f'Giro a la IZQUIERDA (Derecha bloqueada): lado={lado}')
         else:
-            lado = 'izq' if self.d_left >= self.d_right else 'der'
-            self._log_evento(f'Giro NORMAL: lado={lado}')
+            lado = 'der' # Fallback por defecto
         return lado
 
     def _iniciar_giro(self, ahora):
@@ -207,28 +218,17 @@ class MazeSolver(Node):
         d_r = self.d_right
         d_l = self.d_left
 
-        ahoraStr = time.strftime('%H:%M:%S')
         ahora          = time.time()
         tiempo_girando = ahora - self.tiempo_inicio_giro
         en_pasillo     = (d_r < DIST_PASILLO and d_l < DIST_PASILLO)
 
-        # --- REGLA PROTEGIDA EN LÍNEA RECTA ---
+        # --- REQUERIMIENTO 3: DETECCIÓN ULTRA-CONSISTENTE DE CALLEJÓN SIN SALIDA ---
         if self.estado in ('avanzar', 'pasillo'):
-            # Ajustado a 0.24 para capturar el callejón con suficiente margen
-            callejon_muerto = (d_f <= 0.24 and d_l < 0.30 and d_r < 0.30)
-            if callejon_muerto:
-                self._cambiar_estado('retroceder', 'callejon detectado (frente y laterales bloqueados)')
-                self.giro_comprometido = False
-                self.reset_filtros()  # NUEVO: Vaciamos los buffers antiguos para que el láser responda al milisegundo
-                return
-
-        if self.estado in ('avanzar', 'pasillo'):
-            esquina_cerrada = (d_f < DIST_ESQUINA_CERRADA and
-                               d_r < DIST_ESQUINA_CERRADA + 0.05 and
-                               d_l < DIST_ESQUINA_CERRADA + 0.05)
-            if esquina_cerrada:
-                self._cambiar_estado('retroceder', 'emergencia: esquina cerrada')
-                self.giro_comprometido = False
+            # Si el frente está bloqueado Y ambos laterales detectan pared muy cerca
+            if d_f < CALLEJON_FRONT and d_l < CALLEJON_LATERAL and d_r < CALLEJON_LATERAL:
+                self._cambiar_estado('girar_180', 'Callejón detectado (muros frontales y laterales cerrados)')
+                self.yaw_inicial = self.yaw
+                self.tiempo_inicio_giro = ahora
                 self.reset_filtros()
                 return
 
@@ -241,7 +241,13 @@ class MazeSolver(Node):
             else:
                 self.ticks_fuera_pasillo += 1
                 if self.ticks_fuera_pasillo >= TICKS_CONFIRMACION:
-                    self._cambiar_estado('avanzar', 'salida pasillo confirmada')
+                    # Al salir de un pasillo, si la derecha se abre, priorizamos meternos por ahí
+                    if d_r > DIST_PASILLO:
+                        self._cambiar_estado('girar_der', 'Abertura a la derecha detectada al salir de pasillo')
+                        self.tiempo_inicio_giro = ahora
+                        self.giro_comprometido = True
+                    else:
+                        self._cambiar_estado('avanzar', 'salida pasillo confirmada')
                     self.ticks_fuera_pasillo = 0
 
         elif self.estado == 'avanzar':
@@ -250,14 +256,10 @@ class MazeSolver(Node):
                 self.ticks_fuera_pasillo = 0
             elif d_f < DIST_PARAR_GIRO:
                 self._iniciar_giro(ahora)
-
-        elif self.estado == 'retroceder':
-            # Buscamos la salida del callejón basándonos en datos instantáneos limpios
-            if self.d_left > 0.40 or self.d_right > 0.40:
-                lado = 'izq' if self.d_left > self.d_right else 'der'
-                self._cambiar_estado(f'girar_{lado}', f'salida trasera encontrada hacia {lado}')
-                self.tiempo_inicio_giro = ahora
-                self.giro_comprometido  = True
+            elif d_r > 0.65: # Hueco claro a la derecha detectado en abierto -> Girar a la derecha prioritariamente
+                self._cambiar_estado('girar_der', 'Prioridad: Girando al abrirse la derecha')
+                self.tiempo_inicio_giro = now = ahora
+                self.giro_comprometido = True
 
         elif self.estado in ('girar_izq', 'girar_der'):
             if self.giro_comprometido:
@@ -269,31 +271,36 @@ class MazeSolver(Node):
                 elif d_f < DIST_PARAR_GIRO - 0.05:
                     self._iniciar_giro(ahora)
 
-        elif self.estado == 'escape':
-            if d_f > DIST_PARAR_GIRO:
-                self._cambiar_estado('avanzar', 'escape completado')
+        elif self.estado == 'girar_180':
+            # Control de salida del giro de 180° por odometría (Yaw)
+            diff_angular = self.yaw - self.yaw_inicial
+            # Normalizar la diferencia angular entre -pi y pi para evitar problemas de wrap
+            diff_angular = math.atan2(math.sin(diff_angular), math.cos(diff_angular))
+            
+            # Si ha girado casi 180 grados (aprox pi rad o > 2.9 rad) y el frente está despejado
+            if tiempo_girando > 2.0 and abs(diff_angular) > 2.90 and d_f > 0.45:
+                self._cambiar_estado('avanzar', 'Giro de 180 grados completado con éxito')
+            # Fallback de seguridad por tiempo si la odometría patina levemente
+            elif tiempo_girando > 8.0 and d_f > 0.45:
+                self._cambiar_estado('avanzar', 'Giro de 180 grados completado por tiempo limite')
 
         # --- APLICACIÓN DE VELOCIDADES ---
         evento = ''
         if self.estado == 'pasillo':
+            # REQUERIMIENTO 2: Mecanismo de centrado dinámico en el pasillo
+            # Error = distancia izquierda - distancia derecha.
+            # Si nos pegamos a la derecha, d_r baja -> error positivo -> gira a la izquierda (+) para centrarse
+            error_pasillo = d_l - d_r
             twist.linear.x  = VEL_LINEAR_PASILLO
-            twist.angular.z = 0.0
-            evento = f'pasillo_recto f={d_f:.2f}'
+            twist.angular.z = max(min(KP_PASILLO * error_pasillo, 0.35), -0.35)
+            evento = f'pasillo_centrado err={error_pasillo:.3f} f={d_f:.2f}'
             
-        elif self.estado == 'retroceder':
-            if self.d_back > DIST_SEGURIDAD_TRASERA:
-                twist.linear.x = -VEL_RETROCESO
-            else:
-                twist.linear.x = 0.0
-            # NUEVO: Bloqueamos el giro angular a 0.0 de forma estricta.
-            # Al no balancear las ruedas de lado a lado con retardos, el robot clava una línea recta perfecta.
-            twist.angular.z = 0.0  
-            evento = f'retrocediendo_recto_puro B={self.d_back:.2f}'
-            
-        elif self.estado == 'escape':
-            twist.linear.x  = -0.05
-            twist.angular.z = VEL_GIRO
-            evento = 'escape'
+        elif self.estado == 'girar_180':
+            # Rotación pura in-situ (linear = 0.0) hacia la derecha para cumplir la prioridad
+            twist.linear.x  = 0.0
+            twist.angular.z = -VEL_GIRO
+            diff_angular = math.atan2(math.sin(self.yaw - self.yaw_inicial), math.cos(self.yaw - self.yaw_inicial))
+            evento = f'ejecutando_180_grados t={tiempo_girando:.1f}s diff={abs(diff_angular):.2f}'
             
         elif self.estado == 'girar_izq':
             twist.linear.x  = VEL_AVANCE_GIRO if d_f > 0.22 else 0.0
@@ -309,7 +316,7 @@ class MazeSolver(Node):
             vel = self.velocidad_frenada(d_f, VEL_LINEAR_NORMAL)
             twist.linear.x = vel
             if d_r > 1.2:
-                twist.angular.z = -0.20
+                twist.angular.z = -0.25  # Gira a la derecha firmemente para buscar el muro de nuevo
                 evento = f'buscando_pared vel={vel:.3f}'
             else:
                 error = DIST_PARED_DERECHA - d_r
