@@ -213,40 +213,34 @@ class MazeSolver(Node):
         en_pasillo     = (d_r < DIST_PASILLO and d_l < DIST_PASILLO)
 
         # -------------------------------------------------------------------
-        # MAQUINA DE ESTADOS - FILTROS Y CAMBIOS (BLOQUEO ESTRICTO GIRO 180)
+        # RADAR DE CALLEJÓN ABSOLUTO (Manda sobre cualquier estado)
         # -------------------------------------------------------------------
-        
-        # Si estamos en el estado bloqueante de giro 180, IGNORAMOS las reglas normales de pasillo
+        if self.estado != 'giro_180':
+            # Si el frente está bloqueado (tolerancia subida a 0.35m para capturarlo antes de que gire)
+            # Y además el pasillo está cerrado a izquierda y derecha (menos de 0.38m de margen lateral)
+            tiene_muro_delante   = (d_f <= 0.35)
+            tiene_muro_izquierda = (d_l < 0.38)
+            tiene_muro_derecha   = (d_r < 0.38)
+
+            if tiene_muro_delante and tiene_muro_izquierda and tiene_muro_derecha:
+                self._cambiar_estado('giro_180', 'CRÍTICO: Callejón sin salida detectado por triple pared')
+                self.tiempo_inicio_giro = ahora
+                self.giro_comprometido = False
+                self.reset_filtros()
+                return
+
+        # -------------------------------------------------------------------
+        # MAQUINA DE ESTADOS REVISADA
+        # -------------------------------------------------------------------
         if self.estado == 'giro_180':
-            self.giro_comprometido = False
-            # Tiempo matemático de bloqueo: 180 grados a 0.28 rad/s = 5.6 segundos
+            # ESTADO BLOQUEANTE TOTAL: No escucha a nada ni a nadie hasta cumplir el tiempo de rotación
+            # Con tu VEL_GIRO = 0.28 rad/s, tarda exactamente 5.6 segundos en rotar 180 grados reales
             if tiempo_girando >= 5.6:
-                self._cambiar_estado('avanzar', 'Giro completo de 180 grados terminado con exito')
+                self._cambiar_estado('avanzar', 'Giro bloqueante de 180 grados completado')
                 self.reset_filtros()
         
         else:
-            # Reglas normales de línea recta solo si NO estamos en la peonza bloqueante
-            if self.estado in ('avanzar', 'pasillo'):
-                callejon_muerto = (d_f <= 0.24 and d_l < 0.30 and d_r < 0.30)
-                if callejon_muerto:
-                    self._cambiar_estado('giro_180', 'callejon detectado (activando peonza bloqueante)')
-                    self.tiempo_inicio_giro = ahora
-                    self.giro_comprometido = False
-                    self.reset_filtros()  
-                    return
-
-            if self.estado in ('avanzar', 'pasillo'):
-                esquina_cerrada = (d_f < DIST_ESQUINA_CERRADA and
-                                   d_r < DIST_ESQUINA_CERRADA + 0.05 and
-                                   d_l < DIST_ESQUINA_CERRADA + 0.05)
-                if esquina_cerrada:
-                    self._cambiar_estado('giro_180', 'emergencia: esquina cerrada (activando peonza bloqueante)')
-                    self.tiempo_inicio_giro = ahora
-                    self.giro_comprometido = False
-                    self.reset_filtros()
-                    return
-
-            # Máquina de estados de navegación clásica
+            # Lógica secuencial normal de navegación
             if self.estado == 'pasillo':
                 if en_pasillo:
                     self.ticks_fuera_pasillo = 0
@@ -280,7 +274,7 @@ class MazeSolver(Node):
                     self._cambiar_estado('avanzar', 'escape completado')
 
         # -------------------------------------------------------------------
-        # APLICACIÓN DE VELOCIDADES REALES
+        # APLICACIÓN DE VELOCIDADES MOTOR
         # -------------------------------------------------------------------
         evento = ''
         if self.estado == 'pasillo':
@@ -289,9 +283,9 @@ class MazeSolver(Node):
             evento = f'pasillo_recto f={d_f:.2f}'
             
         elif self.estado == 'giro_180':
-            twist.linear.x = 0.0        # Bloqueo total de avance lineal para no rozar paredes
-            twist.angular.z = VEL_GIRO  # Giro puro sobre su propio eje central
-            evento = f'PEONZA_BLOQUEANTE_180 t={tiempo_girando:.1f}s'
+            twist.linear.x = 0.0        # Clavado en el sitio, sin avances peligrosos
+            twist.angular.z = VEL_GIRO  # Pivotaje puro tipo compás
+            evento = f'PEONZA_BLOQUEANTE_ACTIVA t={tiempo_girando:.1f}s'
             
         elif self.estado == 'escape':
             twist.linear.x  = -0.05
@@ -308,7 +302,7 @@ class MazeSolver(Node):
             twist.angular.z = -VEL_GIRO
             evento = f'girar_der arco={twist.linear.x>0} t={tiempo_girando:.1f}s'
             
-        else:  # avanzar (Mecanismo PID centrado inteligente en pasillos)
+        else:  # avanzar con centrado automático por lectura combinada izquierda/derecha
             vel = self.velocidad_frenada(d_f, VEL_LINEAR_NORMAL)
             twist.linear.x = vel
             if d_r < DIST_PASILLO and d_l < DIST_PASILLO:
