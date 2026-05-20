@@ -9,9 +9,9 @@ import math
 import time
 from collections import deque
 
-# --- PARÁMETROS REAJUSTADOS Y COORDINADOS ---
-DIST_GIRO_PASILLO      = 0.30   # Bajado ligeramente para coordinar con el frente
-DIST_PARAR_GIRO        = 0.30   # Umbral de giro normal
+# --- PARÁMETROS RESTAURADOS Y COORDINADOS ---
+DIST_GIRO_PASILLO      = 0.24   # RESTAURADO: Tu distancia perfecta de giro
+DIST_PARAR_GIRO        = 0.24   # RESTAURADO: Tu distancia perfecta de giro
 DIST_FRENAR            = 0.55   
 DIST_PARED_DERECHA     = 0.25   
 DIST_PASILLO           = 0.45   
@@ -213,12 +213,11 @@ class MazeSolver(Node):
         en_pasillo     = (d_r < DIST_PASILLO and d_l < DIST_PASILLO)
 
         # -------------------------------------------------------------------
-        # RADAR DE CALLEJÓN ABSOLUTO (JERARQUÍA CORREGIDA: SÓLO EN EXTREMO)
+        # RADAR DE CALLEJÓN ABSOLUTO (SÓLO SI PASA DE TU DISTANCIA DE GIRO)
         # -------------------------------------------------------------------
         if self.estado != 'giro_180':
-            # El callejón solo se confirma si se mete hasta el fondo (0.22m)
-            # y ambos laterales están obstruidos (menos de 0.32m)
-            tiene_muro_delante   = (d_f <= 0.22)
+            # Solo saltará si ignora el giro a 0.24m porque está encajonado a 0.18m
+            tiene_muro_delante   = (d_f <= 0.18)
             tiene_muro_izquierda = (d_l < 0.32)
             tiene_muro_derecha   = (d_r < 0.32)
 
