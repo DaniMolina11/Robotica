@@ -214,12 +214,11 @@ class MazeSolver(Node):
 
         # --- REGLA PROTEGIDA EN LÍNEA RECTA ---
         if self.estado in ('avanzar', 'pasillo'):
-            # Ajustado a 0.24 para capturar el callejón con suficiente margen
             callejon_muerto = (d_f <= 0.24 and d_l < 0.30 and d_r < 0.30)
             if callejon_muerto:
-                self._cambiar_estado('retroceder', 'callejon detectado (frente y laterales bloqueados)')
+                self._cambiar_estado('giro_180', 'callejon detectado (frente y laterales bloqueados)')
                 self.giro_comprometido = False
-                self.reset_filtros()  # NUEVO: Vaciamos los buffers antiguos para que el láser responda al milisegundo
+                self.reset_filtros()
                 return
 
         if self.estado in ('avanzar', 'pasillo'):
@@ -227,7 +226,7 @@ class MazeSolver(Node):
                                d_r < DIST_ESQUINA_CERRADA + 0.05 and
                                d_l < DIST_ESQUINA_CERRADA + 0.05)
             if esquina_cerrada:
-                self._cambiar_estado('retroceder', 'emergencia: esquina cerrada')
+                self._cambiar_estado('giro_180', 'emergencia: esquina cerrada')
                 self.giro_comprometido = False
                 self.reset_filtros()
                 return
@@ -251,13 +250,9 @@ class MazeSolver(Node):
             elif d_f < DIST_PARAR_GIRO:
                 self._iniciar_giro(ahora)
 
-        elif self.estado == 'retroceder':
-            # Buscamos la salida del callejón basándonos en datos instantáneos limpios
-            if self.d_left > 0.40 or self.d_right > 0.40:
-                lado = 'izq' if self.d_left > self.d_right else 'der'
-                self._cambiar_estado(f'girar_{lado}', f'salida trasera encontrada hacia {lado}')
-                self.tiempo_inicio_giro = ahora
-                self.giro_comprometido  = True
+        elif self.estado == 'giro_180':
+            if d_f > 0.40:
+                self._cambiar_estado('avanzar', 'salida encontrada de frente')
 
         elif self.estado in ('girar_izq', 'girar_der'):
             if self.giro_comprometido:
@@ -280,15 +275,10 @@ class MazeSolver(Node):
             twist.angular.z = 0.0
             evento = f'pasillo_recto f={d_f:.2f}'
             
-        elif self.estado == 'retroceder':
-            if self.d_back > DIST_SEGURIDAD_TRASERA:
-                twist.linear.x = -VEL_RETROCESO
-            else:
-                twist.linear.x = 0.0
-            # NUEVO: Bloqueamos el giro angular a 0.0 de forma estricta.
-            # Al no balancear las ruedas de lado a lado con retardos, el robot clava una línea recta perfecta.
-            twist.angular.z = 0.0  
-            evento = f'retrocediendo_recto_puro B={self.d_back:.2f}'
+        elif self.estado == 'giro_180':
+            twist.linear.x = 0.0
+            twist.angular.z = VEL_GIRO
+            evento = f'pivotando_180 F={d_f:.2f}'
             
         elif self.estado == 'escape':
             twist.linear.x  = -0.05
@@ -308,13 +298,27 @@ class MazeSolver(Node):
         else:  # avanzar
             vel = self.velocidad_frenada(d_f, VEL_LINEAR_NORMAL)
             twist.linear.x = vel
-            if d_r > 1.2:
-                twist.angular.z = -0.20
-                evento = f'buscando_pared vel={vel:.3f}'
-            else:
+            
+            # --- CENTRADO EN PASILLOS (NUEVO MECANISMO) ---
+            # Si ambas paredes están a distancia de pasillo, nos centramos usando las dos distancias
+            if d_r < DIST_PASILLO and d_l < DIST_PASILLO:
+                # El error es la diferencia entre los dos lados.
+                # Si d_l > d_r, el robot está muy a la derecha, error es positivo -> gira a la izquierda (+z)
+                error_centrado = d_l - d_r
+                twist.angular.z = max(min(KP * error_centrado, 0.40), -0.40)
+                evento = f'centrando_pasillo err={error_centrado:.3f} vel={vel:.3f}'
+            
+            # Si solo detecta la pared derecha, usa tu lógica clásica
+            elif d_r <= 1.2:
                 error = DIST_PARED_DERECHA - d_r
                 twist.angular.z = max(min(KP * error, 0.40), -0.40)
                 evento = f'siguiendo_pared_der err={error:.3f} vel={vel:.3f}'
+                
+            # Si no hay ninguna pared cerca, busca hacia la derecha
+            else:
+                twist.angular.z = -0.20
+                evento = f'buscando_pared vel={vel:.3f}'
+                
             if vel < VEL_LINEAR_NORMAL:
                 evento += ' FRENANDO'
 
