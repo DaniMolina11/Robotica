@@ -118,8 +118,6 @@ class MazeSolver(Node):
         return sum(buf) / len(buf) if buf else 3.0
 
     def reset_filtros(self):
-        # CORRECCIÓN: En vez de hacer .clear(), mantenemos el último valor 
-        # repetido para que len(buf) siga siendo N_LECTURAS_PROMEDIO y no bloquee el loop
         for buf, val in [(self.buf_front, self.d_front), (self.buf_right, self.d_right),
                          (self.buf_left, self.d_left), (self.buf_back, self.d_back),
                          (self.buf_diag_izq, self.d_diag_izq), (self.buf_diag_der, self.d_diag_der)]:
@@ -303,29 +301,32 @@ class MazeSolver(Node):
             vel = self.velocidad_frenada(d_f, VEL_LINEAR_NORMAL)
             twist.linear.x = vel
             
-            # --- FILTRO ANTIFANTASMAS / INTERSECCIONES LATERALES ---
-            if d_r < 0.40 and d_l < 0.40:
+            # --- CENTRADO SUAVE REAJUSTADO (Tolerancia ampliada a 0.50m) ---
+            # Caso 1: Pasillo normal cerrado. Centrado geométrico puro y suavizado a max 0.25
+            if d_r < 0.50 and d_l < 0.50:
                 error_centrado = d_l - d_r
-                twist.angular.z = max(min(KP * error_centrado, 0.40), -0.40)
+                twist.angular.z = max(min(KP * error_centrado, 0.25), -0.25)
                 evento = f'centrando_en_pasillo err={error_centrado:.3f} vel={vel:.3f}'
             
-            elif d_r < 0.40 and d_l >= 0.40:
+            # Caso 2: Intersección izquierda. Ignora lado abierto y sigue pared derecha de forma suave
+            elif d_r < 0.50 and d_l >= 0.50:
                 error = DIST_PARED_DERECHA - d_r
-                twist.angular.z = max(min(KP * error, 0.40), -0.40)
+                twist.angular.z = max(min(KP * error, 0.25), -0.25)
                 evento = f'interseccion_izq: siguiendo_pared_der err={error:.3f}'
             
-            elif d_l < 0.40 and d_r >= 0.40:
+            # Caso 3: Intersección derecha. Ignora lado abierto y sigue pared izquierda de forma suave
+            elif d_l < 0.50 and d_r >= 0.50:
                 error = d_l - DIST_PARED_DERECHA  
-                twist.angular.z = max(min(KP * error, 0.40), -0.40)
+                twist.angular.z = max(min(KP * error, 0.25), -0.25)
                 evento = f'interseccion_der: siguiendo_pared_izq err={error:.3f}'
                 
             else:
                 if d_r > 1.2:
-                    twist.angular.z = -0.20
+                    twist.angular.z = -0.15
                     evento = f'buscando_pared vel={vel:.3f}'
                 else:
                     error = DIST_PARED_DERECHA - d_r
-                    twist.angular.z = max(min(KP * error, 0.40), -0.40)
+                    twist.angular.z = max(min(KP * error, 0.25), -0.25)
                     evento = f'siguiendo_pared_der_abierta err={error:.3f}'
                     
             if vel < VEL_LINEAR_NORMAL:
