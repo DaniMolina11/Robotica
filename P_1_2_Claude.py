@@ -301,19 +301,31 @@ class MazeSolver(Node):
             vel = self.velocidad_frenada(d_f, VEL_LINEAR_NORMAL)
             twist.linear.x = vel
             
-            # --- MODIFICADO: Tolerancia de centrado ampliada a 0.55m ---
-            # Al darle más rango, el robot no apagará el PID simétrico aunque oscile ligeramente
-            if d_r < 0.55 and d_l < 0.55:
+            # --- FILTRO ANTIFANTASMAS / INTERSECCIONES LATERALES ---
+            if d_r < 0.40 and d_l < 0.40:
                 error_centrado = d_l - d_r
                 twist.angular.z = max(min(KP * error_centrado, 0.40), -0.40)
                 evento = f'centrando_en_pasillo err={error_centrado:.3f} vel={vel:.3f}'
-            elif d_r > 1.2:
-                twist.angular.z = -0.20
-                evento = f'buscando_pared vel={vel:.3f}'
-            else:
+            
+            elif d_r < 0.40 and d_l >= 0.40:
                 error = DIST_PARED_DERECHA - d_r
                 twist.angular.z = max(min(KP * error, 0.40), -0.40)
-                evento = f'siguiendo_pared_der err={error:.3f} vel={vel:.3f}'
+                evento = f'interseccion_izq: siguiendo_pared_der err={error:.3f}'
+            
+            elif d_l < 0.40 and d_r >= 0.40:
+                error = d_l - DIST_PARED_DERECHA  
+                twist.angular.z = max(min(KP * error, 0.40), -0.40)
+                evento = f'interseccion_der: siguiendo_pared_izq err={error:.3f}'
+                
+            else:
+                if d_r > 1.2:
+                    twist.angular.z = -0.20
+                    evento = f'buscando_pared vel={vel:.3f}'
+                else:
+                    error = DIST_PARED_DERECHA - d_r
+                    twist.angular.z = max(min(KP * error, 0.40), -0.40)
+                    evento = f'siguiendo_pared_der_abierta err={error:.3f}'
+                    
             if vel < VEL_LINEAR_NORMAL:
                 evento += ' FRENANDO'
 
