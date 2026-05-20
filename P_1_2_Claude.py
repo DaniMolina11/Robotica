@@ -9,9 +9,9 @@ import math
 import time
 from collections import deque
 
-# --- PARÁMETROS RESTAURADOS Y COORDINADOS ---
-DIST_GIRO_PASILLO      = 0.24   # Tu distancia perfecta de giro
-DIST_PARAR_GIRO        = 0.24   # Tu distancia perfecta de giro
+# --- PARÁMETROS DE TU CÓDIGO ORIGINAL ---
+DIST_GIRO_PASILLO      = 0.32   
+DIST_PARAR_GIRO        = 0.32
 DIST_FRENAR            = 0.55   
 DIST_PARED_DERECHA     = 0.25   
 DIST_PASILLO           = 0.45   
@@ -24,7 +24,6 @@ VEL_RETROCESO         = 0.05
 VEL_GIRO              = 0.28   
 VEL_AVANCE_GIRO       = 0.06   
 KP                    = 1.2
-KD_ALINEAR            = 1.0     # Nueva ganancia para corregir la inclinación angular de las diagonales
 
 TIEMPO_GIRO_MINIMO    = 1.5
 N_LECTURAS_PROMEDIO   = 5
@@ -71,7 +70,7 @@ class MazeSolver(Node):
         self.DISTANCIA_MINIMA_META = 0.25
         self.meta_alcanzada       = False
 
-        self.sim_time = 0.0
+        self.sim_time    = 0.0
         self.vel_lin_pub = 0.0
         self.vel_ang_pub = 0.0
 
@@ -115,21 +114,17 @@ class MazeSolver(Node):
     def sector_min(self, ranges, a, b):
         return min(self.clean(ranges[i]) for i in range(a, b))
 
-    def sector_promedio(self, ranges, a, b):
-        valid_vals = [self.clean(ranges[i]) for i in range(a, b)]
-        return sum(valid_vals) / len(valid_vals) if valid_vals else 3.0
-
     def promedio(self, buf):
         return sum(buf) / len(buf) if buf else 3.0
 
     def reset_filtros(self):
-        for buf, val in [(self.buf_front, self.d_front), (self.buf_right, self.d_right),
-                         (self.buf_left, self.d_left), (self.buf_back, self.d_back),
-                         (self.buf_diag_izq, self.d_diag_izq), (self.buf_diag_der, self.d_diag_der)]:
-            buf.clear()
-            for _ in range(N_LECTURAS_PROMEDIO):
-                buf.append(val)
-        self.lecturas_acumuladas = N_LECTURAS_PROMEDIO
+        self.buf_front.clear()
+        self.buf_right.clear()
+        self.buf_left.clear()
+        self.buf_back.clear()
+        self.buf_diag_izq.clear()
+        self.buf_diag_der.clear()
+        self.lecturas_acumuladas = 0
 
     def velocidad_frenada(self, d_front, vel_max):
         if d_front >= DIST_FRENAR:
@@ -143,16 +138,13 @@ class MazeSolver(Node):
         r = msg.ranges
         if len(r) < 360:
             return
-            
-        self.buf_front.append(min(self.sector_min(r, 355, 360), self.sector_min(r, 0, 5)))
-        self.buf_right.append(self.sector_promedio(r, 265, 275)) 
-        self.buf_left.append(self.sector_promedio(r, 85, 95))    
-        self.buf_back.append(self.sector_min(r, 175, 185))
-        
-        # PROMEDIOS DIAGONALES MEJORADOS: Para afinar el cálculo de paralelismo de pasillo
-        self.buf_diag_izq.append(self.sector_promedio(r, 40, 50))
-        self.buf_diag_der.append(self.sector_promedio(r, 310, 320))
-        
+        self.buf_front.append(min(self.sector_min(r, 350, 360),
+                                  self.sector_min(r,   0,  10)))
+        self.buf_right.append(   self.sector_min(r, 260, 310))
+        self.buf_left.append(    self.sector_min(r,  50, 110))
+        self.buf_back.append(    self.sector_min(r, 170, 190))
+        self.buf_diag_izq.append(self.sector_min(r,  30,  60))
+        self.buf_diag_der.append(self.sector_min(r, 300, 330))
         self.lecturas_acumuladas += 1
         self.d_front    = self.promedio(self.buf_front)
         self.d_right    = self.promedio(self.buf_right)
@@ -214,73 +206,57 @@ class MazeSolver(Node):
         d_f = self.d_front
         d_r = self.d_right
         d_l = self.d_left
-        d_di = self.d_diag_izq
-        d_dd = self.d_diag_der
 
         ahoraStr = time.strftime('%H:%M:%S')
         ahora          = time.time()
         tiempo_girando = ahora - self.tiempo_inicio_giro
         en_pasillo     = (d_r < DIST_PASILLO and d_l < DIST_PASILLO)
 
-        # -------------------------------------------------------------------
-        # RADAR DE CALLEJÓN ABSOLUTO
-        # -------------------------------------------------------------------
-        if self.estado != 'giro_180':
-            tiene_muro_delante   = (d_f <= 0.18)
-            tiene_muro_izquierda = (d_l < 0.32)
-            tiene_muro_derecha   = (d_r < 0.32)
-
-            if tiene_muro_delante and tiene_muro_izquierda and tiene_muro_derecha:
-                self._cambiar_estado('giro_180', 'CRÍTICO: Callejón sin salida confirmado por encajonamiento')
-                self.tiempo_inicio_giro = ahora
-                self.giro_comprometido = False
-                self.reset_filtros()
-                return
-
-        # -------------------------------------------------------------------
-        # MAQUINA DE ESTADOS
-        # -------------------------------------------------------------------
-        if self.estado == 'giro_180':
-            if tiempo_girando >= 5.6:
-                self._cambiar_estado('avanzar', 'Giro completo de 180 grados terminado con exito')
-                self.reset_filtros()
-        
-        else:
-            if self.estado == 'pasillo':
-                if en_pasillo:
+        # --- MÁQUINA DE ESTADOS ---
+        if self.estado == 'pasillo':
+            if en_pasillo:
+                self.ticks_fuera_pasillo = 0
+                if d_f < DIST_GIRO_PASILLO:
+                    self._iniciar_giro(ahora)
+            else:
+                self.ticks_fuera_pasillo += 1
+                if self.ticks_fuera_pasillo >= TICKS_CONFIRMACION:
+                    self._cambiar_estado('avanzar', 'salida pasillo confirmada')
                     self.ticks_fuera_pasillo = 0
-                    if d_f < DIST_GIRO_PASILLO:
-                        self._iniciar_giro(ahora)
-                else:
-                    self.ticks_fuera_pasillo += 1
-                    if self.ticks_fuera_pasillo >= TICKS_CONFIRMACION:
-                        self._cambiar_estado('avanzar', 'salida pasillo confirmada')
-                        self.ticks_fuera_pasillo = 0
 
-            elif self.estado == 'avanzar':
-                if en_pasillo and d_f >= DIST_GIRO_PASILLO:
-                    self._cambiar_estado('pasillo', 'pasillo detectado')
-                    self.ticks_fuera_pasillo = 0
-                elif d_f < DIST_PARAR_GIRO:
+        elif self.estado == 'avanzar':
+            if en_pasillo and d_f >= DIST_GIRO_PASILLO:
+                self._cambiar_estado('pasillo', 'pasillo detectado')
+                self.ticks_fuera_pasillo = 0
+            elif d_f < DIST_PARAR_GIRO:
+                self._iniciar_giro(ahora)
+
+        elif self.estado == 'giro_180':
+            # Mecanismo peonza: gira en el sitio hasta que el frente se limpie por completo
+            if d_f > 0.40:
+                self._cambiar_estado('avanzar', f'salida del callejon completada d_f={d_f:.2f}')
+
+        elif self.estado in ('girar_izq', 'girar_der'):
+            if self.giro_comprometido:
+                if tiempo_girando >= TIEMPO_GIRO_MINIMO:
+                    self.giro_comprometido = False
+            else:
+                # --- MECANISMO DE GIRO 180 PEDIDO EN EL INSTANTE CRÍTICO (1.5s) ---
+                # Si tras el tiempo mínimo de un giro normal el frente y ambos lados puros siguen asfixiados:
+                if d_f <= 0.25 and d_l < 0.35 and d_r < 0.35:
+                    self._cambiar_estado('giro_180', 'Callejon sin salida real detectado tras 1.5s. Activando peonza.')
+                    self.reset_filtros()
+                # Si no es un callejón y el frente se abrió, salimos normal
+                elif d_f >= DIST_PARAR_GIRO + 0.10:
+                    self._cambiar_estado('avanzar', f'frente libre d_f={d_f:.2f}')
+                elif d_f < DIST_PARAR_GIRO - 0.05:
                     self._iniciar_giro(ahora)
 
-            elif self.estado in ('girar_izq', 'girar_der'):
-                if self.giro_comprometido:
-                    if tiempo_girando >= TIEMPO_GIRO_MINIMO:
-                        self.giro_comprometido = False
-                else:
-                    if d_f >= DIST_PARAR_GIRO + 0.10:
-                        self._cambiar_estado('avanzar', f'frente libre d_f={d_f:.2f}')
-                    elif d_f < DIST_PARAR_GIRO - 0.05:
-                        self._iniciar_giro(ahora)
+        elif self.estado == 'escape':
+            if d_f > DIST_PARAR_GIRO:
+                self._cambiar_estado('avanzar', 'escape completado')
 
-            elif self.estado == 'escape':
-                if d_f > DIST_PARAR_GIRO:
-                    self._cambiar_estado('avanzar', 'escape completado')
-
-        # -------------------------------------------------------------------
-        # APLICACIÓN DE VELOCIDADES MOTOR (DOBLE CONTROL ACTIVO EN RECTA)
-        # -------------------------------------------------------------------
+        # --- APLICACIÓN DE VELOCIDADES ---
         evento = ''
         if self.estado == 'pasillo':
             twist.linear.x  = VEL_LINEAR_PASILLO
@@ -288,9 +264,9 @@ class MazeSolver(Node):
             evento = f'pasillo_recto f={d_f:.2f}'
             
         elif self.estado == 'giro_180':
-            twist.linear.x = 0.0        
-            twist.angular.z = VEL_GIRO  
-            evento = f'PEONZA_BLOQUEANTE_ACTIVA t={tiempo_girando:.1f}s'
+            twist.linear.x = 0.0        # Prohibido avanzar o retroceder de forma lineal
+            twist.angular.z = VEL_GIRO  # Pivotaje puro a la velocidad de tus giros
+            evento = f'pivotando_180_grados F={d_f:.2f}'
             
         elif self.estado == 'escape':
             twist.linear.x  = -0.05
@@ -307,40 +283,20 @@ class MazeSolver(Node):
             twist.angular.z = -VEL_GIRO
             evento = f'girar_der arco={twist.linear.x>0} t={tiempo_girando:.1f}s'
             
-        else:  # avanzar
+        else:  # avanzar (Mecanismo de centrado en pasillos combinando ambas paredes si están cerca)
             vel = self.velocidad_frenada(d_f, VEL_LINEAR_NORMAL)
             twist.linear.x = vel
-            
-            # --- DOBLE PID DE CENTRADO Y ALINEACIÓN PARALELA ---
-            if d_r < 0.50 and d_l < 0.50:
-                error_centrado = d_l - d_r        # Componente 1: Error de distancia lateral lateral
-                error_angular  = d_di - d_dd      # Componente 2: Error de inclinación por diagonales
-                
-                # Sumamos ambos errores. Si el robot sale inclinado a la derecha, 
-                # error_angular será positivo, sumando fuerza de giro a la izquierda (+z) de inmediato
-                giro_total = (KP * error_centrado) + (KD_ALINEAR * error_angular)
-                twist.angular.z = max(min(giro_total, 0.35), -0.35) # Ampliado a 0.35 para que tenga fuerza post-giro
-                evento = f'centrando_y_alineando err_c={error_centrado:.2f} err_a={error_angular:.2f}'
-            
-            elif d_r < 0.50 and d_l >= 0.50:
-                error = DIST_PARED_DERECHA - d_r
-                twist.angular.z = max(min(KP * error, 0.25), -0.25)
-                evento = f'interseccion_izq: siguiendo_pared_der err={error:.3f}'
-            
-            elif d_l < 0.40 and d_r >= 0.50:
-                error = d_l - DIST_PARED_DERECHA  
-                twist.angular.z = max(min(KP * error, 0.25), -0.25)
-                evento = f'interseccion_der: siguiendo_pared_izq err={error:.3f}'
-                
+            if d_r < DIST_PASILLO and d_l < DIST_PASILLO:
+                error_centrado = d_l - d_r
+                twist.angular.z = max(min(KP * error_centrado, 0.40), -0.40)
+                evento = f'centrando_en_pasillo err={error_centrado:.3f} vel={vel:.3f}'
+            elif d_r > 1.2:
+                twist.angular.z = -0.20
+                evento = f'buscando_pared vel={vel:.3f}'
             else:
-                if d_r > 1.2:
-                    twist.angular.z = -0.15
-                    evento = f'buscando_pared vel={vel:.3f}'
-                else:
-                    error = DIST_PARED_DERECHA - d_r
-                    twist.angular.z = max(min(KP * error, 0.25), -0.25)
-                    evento = f'siguiendo_pared_der_abierta err={error:.3f}'
-                    
+                error = DIST_PARED_DERECHA - d_r
+                twist.angular.z = max(min(KP * error, 0.40), -0.40)
+                evento = f'siguiendo_pared_der err={error:.3f} vel={vel:.3f}'
             if vel < VEL_LINEAR_NORMAL:
                 evento += ' FRENANDO'
 
