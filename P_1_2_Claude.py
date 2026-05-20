@@ -118,13 +118,15 @@ class MazeSolver(Node):
         return sum(buf) / len(buf) if buf else 3.0
 
     def reset_filtros(self):
-        self.buf_front.clear()
-        self.buf_right.clear()
-        self.buf_left.clear()
-        self.buf_back.clear()
-        self.buf_diag_izq.clear()
-        self.buf_diag_der.clear()
-        self.lecturas_acumuladas = 0
+        # CORRECCIÓN: En vez de hacer .clear(), mantenemos el último valor 
+        # repetido para que len(buf) siga siendo N_LECTURAS_PROMEDIO y no bloquee el loop
+        for buf, val in [(self.buf_front, self.d_front), (self.buf_right, self.d_right),
+                         (self.buf_left, self.d_left), (self.buf_back, self.d_back),
+                         (self.buf_diag_izq, self.d_diag_izq), (self.buf_diag_der, self.d_diag_der)]:
+            buf.clear()
+            for _ in range(N_LECTURAS_PROMEDIO):
+                buf.append(val)
+        self.lecturas_acumuladas = N_LECTURAS_PROMEDIO
 
     def velocidad_frenada(self, d_front, vel_max):
         if d_front >= DIST_FRENAR:
