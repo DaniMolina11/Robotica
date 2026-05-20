@@ -212,25 +212,6 @@ class MazeSolver(Node):
         tiempo_girando = ahora - self.tiempo_inicio_giro
         en_pasillo     = (d_r < DIST_PASILLO and d_l < DIST_PASILLO)
 
-        # --- REGLA PROTEGIDA EN LÍNEA RECTA ---
-        if self.estado in ('avanzar', 'pasillo'):
-            callejon_muerto = (d_f <= 0.24 and d_l < 0.30 and d_r < 0.30)
-            if callejon_muerto:
-                self._cambiar_estado('retroceder', 'callejon detectado (frente y laterales bloqueados)')
-                self.giro_comprometido = False
-                self.reset_filtros()  
-                return
-
-        if self.estado in ('avanzar', 'pasillo'):
-            esquina_cerrada = (d_f < DIST_ESQUINA_CERRADA and
-                               d_r < DIST_ESQUINA_CERRADA + 0.05 and
-                               d_l < DIST_ESQUINA_CERRADA + 0.05)
-            if esquina_cerrada:
-                self._cambiar_estado('retroceder', 'emergencia: esquina cerrada')
-                self.giro_comprometido = False
-                self.reset_filtros()
-                return
-
         # --- MÁQUINA DE ESTADOS ---
         if self.estado == 'pasillo':
             if en_pasillo:
@@ -250,20 +231,23 @@ class MazeSolver(Node):
             elif d_f < DIST_PARAR_GIRO:
                 self._iniciar_giro(ahora)
 
-        elif self.estado == 'retroceder':
-            # BLINDAJE: Solo miramos los laterales puros (d_left y d_right), las diagonales no existen aquí
-            if self.d_left > 0.40 or self.d_right > 0.40:
-                lado = 'izq' if self.d_left > self.d_right else 'der'
-                self._cambiar_estado(f'girar_{lado}', f'salida trasera encontrada hacia {lado}')
-                self.tiempo_inicio_giro = ahora
-                self.giro_comprometido  = True
+        elif self.estado == 'giro_180':
+            # Mecanismo peonza: gira en el sitio hasta que el frente se limpie por completo
+            if d_f > 0.40:
+                self._cambiar_estado('avanzar', f'salida del callejon completada d_f={d_f:.2f}')
 
         elif self.estado in ('girar_izq', 'girar_der'):
             if self.giro_comprometido:
                 if tiempo_girando >= TIEMPO_GIRO_MINIMO:
                     self.giro_comprometido = False
             else:
-                if d_f >= DIST_PARAR_GIRO + 0.10:
+                # --- MECANISMO DE GIRO 180 PEDIDO EN EL INSTANTE CRÍTICO (1.5s) ---
+                # Si tras el tiempo mínimo de un giro normal el frente y ambos lados puros siguen asfixiados:
+                if d_f <= 0.25 and d_l < 0.35 and d_r < 0.35:
+                    self._cambiar_estado('giro_180', 'Callejon sin salida real detectado tras 1.5s. Activando peonza.')
+                    self.reset_filtros()
+                # Si no es un callejón y el frente se abrió, salimos normal
+                elif d_f >= DIST_PARAR_GIRO + 0.10:
                     self._cambiar_estado('avanzar', f'frente libre d_f={d_f:.2f}')
                 elif d_f < DIST_PARAR_GIRO - 0.05:
                     self._iniciar_giro(ahora)
@@ -279,14 +263,10 @@ class MazeSolver(Node):
             twist.angular.z = 0.0
             evento = f'pasillo_recto f={d_f:.2f}'
             
-        elif self.estado == 'retroceder':
-            if self.d_back > DIST_SEGURIDAD_TRASERA:
-                twist.linear.x = -VEL_RETROCESO
-            else:
-                twist.linear.x = 0.0
-            # Marcha atrás perfectamente recta para que no intente girar usando diagonales falsas
-            twist.angular.z = 0.0  
-            evento = f'retrocediendo_recto_puro B={self.d_back:.2f}'
+        elif self.estado == 'giro_180':
+            twist.linear.x = 0.0        # Prohibido avanzar o retroceder de forma lineal
+            twist.angular.z = VEL_GIRO  # Pivotaje puro a la velocidad de tus giros
+            evento = f'pivotando_180_grados F={d_f:.2f}'
             
         elif self.estado == 'escape':
             twist.linear.x  = -0.05
@@ -303,10 +283,14 @@ class MazeSolver(Node):
             twist.angular.z = -VEL_GIRO
             evento = f'girar_der arco={twist.linear.x>0} t={tiempo_girando:.1f}s'
             
-        else:  # avanzar
+        else:  # avanzar (Mecanismo de centrado en pasillos combinando ambas paredes si están cerca)
             vel = self.velocidad_frenada(d_f, VEL_LINEAR_NORMAL)
             twist.linear.x = vel
-            if d_r > 1.2:
+            if d_r < DIST_PASILLO and d_l < DIST_PASILLO:
+                error_centrado = d_l - d_r
+                twist.angular.z = max(min(KP * error_centrado, 0.40), -0.40)
+                evento = f'centrando_en_pasillo err={error_centrado:.3f} vel={vel:.3f}'
+            elif d_r > 1.2:
                 twist.angular.z = -0.20
                 evento = f'buscando_pared vel={vel:.3f}'
             else:
