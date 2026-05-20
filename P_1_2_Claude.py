@@ -7,34 +7,30 @@ from sensor_msgs.msg import LaserScan
 from nav_msgs.msg import Odometry
 import math
 import time
-from collections import deque
 
-# --- PARÁMETROS ADUSTADOS A PASILLOS DE 30-35 CM ---
+# --- PARÁMETROS CONFIGURADOS PARA PASILLOS DE 30-35 CM ---
 DIST_PASILLO           = 0.25   # Ambos lados por debajo de esto = Pasillo
 DIST_PARED_DERECHA     = 0.16   # Centro ideal en pasillo de ~32cm
-DIST_GIRO_PASILLO      = 0.23   # Distancia al frente para actuar
-DIST_PARAR_GIRO        = 0.23   
+DIST_GIRO_PASILLO      = 0.22   # Distancia al frente para actuar
+DIST_PARAR_GIRO        = 0.22   
 
 # Umbrales estrictos para callejón sin salida
 CALLEJON_FRONT         = 0.24
 CALLEJON_LATERAL       = 0.22
 
-# VELOCIDADES DE PRECISIÓN (Movimiento controlado)
+# VELOCIDADES DE PRECISIÓN (Calma y control)
 VEL_LINEAR_PASILLO    = 0.03   
 VEL_LINEAR_NORMAL     = 0.04   
 VEL_AVANCE_GIRO       = 0.01   
 VEL_GIRO              = 0.18   
 
-# PID AGRESIVO Y PRIORITARIO PARA PASILLO
-KP_PASILLO            = 3.5    # Alta prioridad para corregir al instante
-KI_PASILLO            = 0.05   
-KD_PASILLO            = 1.5    # Amortigua el giro para evitar que se pase de largo
+# PID AGRESIVO Y SIN RETARDO PARA PASILLO
+KP_PASILLO            = 3.8    # Respuesta inmediata al descentrado
+KI_PASILLO            = 0.02   
+KD_PASILLO            = 1.6    # Amortiguación real para eliminar la oscilación
 
 KP_NORMAL             = 1.5    
-
-# CONSTANTES DE TIEMPO Y FILTROS
 TIEMPO_GIRO_MINIMO    = 1.5    
-N_LECTURAS_PROMEDIO   = 5
 TICKS_CONFIRMACION    = 3
 
 LOG_FILE = '/home/ros/Escriptori/Robotica/maze_log.txt'
@@ -44,15 +40,11 @@ class MazeSolver(Node):
         super().__init__('maze_solver_node')
 
         self.cmd_pub  = self.create_publisher(Twist, '/cmd_vel', 10)
+        # Suscripción al Scan: Aquí nacerá el pulso de control del robot
         self.scan_sub = self.create_subscription(LaserScan, '/scan', self.scan_callback, 10)
         self.odom_sub = self.create_subscription(Odometry,  '/odom', self.odom_callback, 10)
-        self.timer    = self.create_timer(0.1, self.control_loop)
 
-        self.buf_front    = deque(maxlen=N_LECTURAS_PROMEDIO)
-        self.buf_right    = deque(maxlen=N_LECTURAS_PROMEDIO)
-        self.buf_left     = deque(maxlen=N_LECTURAS_PROMEDIO)
-        self.buf_back     = deque(maxlen=N_LECTURAS_PROMEDIO)
-
+        # Variables de lectura instantánea (Sin deques/retardos)
         self.d_front    = 3.0
         self.d_right    = 3.0
         self.d_left     = 3.0
@@ -62,12 +54,14 @@ class MazeSolver(Node):
         self.pos_y = 0.0
         self.yaw   = 0.0
         self.yaw_inicial = 0.0
-        self.lecturas_acumuladas = 0
 
+        # Control de tiempo real para el PID
+        self.sim_time             = 0.0
+        self.last_sim_time        = 0.0
         self.error_anterior_pasillo = 0.0
         self.integral_pasillo       = 0.0
 
-        self.estado              = 'esperando'
+        self.estado              = 'avanzar'
         self.tiempo_inicio_giro  = 0.0
         self.giro_comprometido   = False
         self.ticks_fuera_pasillo = 0
@@ -76,10 +70,9 @@ class MazeSolver(Node):
         self.META_Y               = 1.71
         self.DISTANCIA_MINIMA_META = 0.25
         self.meta_alcanzada       = False
-        self.sim_time             = 0.0
 
         self.log_file = open(LOG_FILE, 'w')
-        self._log_raw('=== INICIO SESION RANGOS MINIMOS PID ===')
+        self._log_raw('=== INICIO SESION CONTROL SINCRONO SENSOR-MOTOR ===')
 
     def _log_raw(self, msg):
         ts = time.strftime('%H:%M:%S')
@@ -99,36 +92,31 @@ class MazeSolver(Node):
     def sector_min(self, ranges, a, b):
         return min(self.clean(ranges[i]) for i in range(a, b))
 
-    def promedio(self, buf):
-        return sum(buf) / len(buf) if buf else 3.0
-
-    def reset_filtros(self):
-        self.buf_front.clear()
-        self.buf_right.clear()
-        self.buf_left.clear()
-        self.buf_back.clear()
-        self.lecturas_acumuladas = 0
-
     def scan_callback(self, msg):
         r = msg.ranges
         if len(r) < 360:
             return
         
-        # Frente y atrás se mantienen estables
-        self.buf_front.append(min(self.sector_min(r, 350, 360), self.sector_min(r, 0, 10)))
-        self.buf_back.append(self.sector_min(r, 170, 190))
-        
-        # NUEVA LÓGICA DE RANGOS AMPLIOS: Buscamos el punto más cercano de la pared lateral
-        # Al quedarnos con el mínimo de un abanico de 60 grados, solucionamos el problema del robot girado
-        self.buf_left.append(self.sector_min(r, 60, 120))    # Rango izquierdo amplio (90° +/- 30°)
-        self.buf_right.append(self.sector_min(r, 240, 300))  # Rango derecho amplio (270° +/- 30°)
-        
-        self.lecturas_acumuladas += 1
-        self.d_front = self.promedio(self.buf_front)
-        self.d_right = self.promedio(self.buf_right)
-        self.d_left  = self.promedio(self.buf_left)
-        self.d_back  = self.promedio(self.buf_back)
+        # 1. MARCAR EL TIEMPO DE SIMULACIÓN Y CALCULAR DT REAL
         self.sim_time = msg.header.stamp.sec + msg.header.stamp.nanosec * 1e-9
+        if self.last_sim_time == 0.0:
+            self.last_sim_time = self.sim_time
+            return
+        
+        dt = self.sim_time - self.last_sim_time
+        self.last_sim_time = self.sim_time
+        
+        if dt <= 0.0: 
+            dt = 0.05 # Salvaguarda por si el reloj se pisa
+
+        # 2. CAPTURAR LAS DISTANCIAS REALES INSTANTÁNEAS (CERO RETARDO)
+        self.d_front = min(self.sector_min(r, 350, 360), self.sector_min(r, 0, 10))
+        self.d_back  = self.sector_min(r, 170, 190)
+        self.d_left  = self.sector_min(r, 60, 120)    # Rango amplio anti-giros
+        self.d_right = self.sector_min(r, 240, 300)  # Rango amplio anti-giros
+
+        # 3. LANZAR EL CONTROLADOR INMEDIATAMENTE CON EL DT REAL
+        self.control_loop(dt)
 
     def odom_callback(self, msg):
         self.pos_x = msg.pose.pose.position.x
@@ -149,7 +137,6 @@ class MazeSolver(Node):
             self.estado = nuevo
 
     def _decidir_lado_giro(self):
-        # Usamos los mínimos reales calculados para saber qué lado está verdaderamente abierto
         if self.d_right > 0.35: 
             lado = 'der' 
         elif self.d_left > 0.35: 
@@ -164,18 +151,12 @@ class MazeSolver(Node):
         self.tiempo_inicio_giro = ahora
         self.giro_comprometido  = True
 
-    def control_loop(self):
+    def control_loop(self, dt):
         twist = Twist()
 
         if self.meta_alcanzada:
             self.cmd_pub.publish(twist)
             return
-
-        if self.lecturas_acumuladas < N_LECTURAS_PROMEDIO:
-            return
-
-        if self.estado == 'esperando':
-            self._cambiar_estado('avanzar', 'Filtros listos')
 
         d_f = self.d_front
         d_r = self.d_right
@@ -191,7 +172,6 @@ class MazeSolver(Node):
                 self._cambiar_estado('girar_180', 'CALLEJÓN CONFIRMADO')
                 self.yaw_inicial = self.yaw
                 self.tiempo_inicio_giro = ahora
-                self.reset_filtros()
                 return
 
         # --- MÁQUINA DE ESTADOS ---
@@ -204,11 +184,11 @@ class MazeSolver(Node):
                 self.ticks_fuera_pasillo += 1
                 if self.ticks_fuera_pasillo >= TICKS_CONFIRMACION:
                     if d_r > DIST_PASILLO:
-                        self._cambiar_estado('girar_der', 'Abertura derecha detectada')
+                        self._cambiar_estado('girar_der', 'El pasillo se abre a la derecha')
                         self.tiempo_inicio_giro = ahora
                         self.giro_comprometido = True
                     elif d_l > DIST_PASILLO:
-                        self._cambiar_estado('girar_izq', 'Abertura izquierda detectada')
+                        self._cambiar_estado('girar_izq', 'El pasillo se abre a la izquierda')
                         self.tiempo_inicio_giro = ahora
                         self.giro_comprometido = True
                     else:
@@ -247,23 +227,24 @@ class MazeSolver(Node):
             elif tiempo_girando > 8.0 and d_f > 0.35:
                 self._cambiar_estado('avanzar', 'Giro 180 abortado')
 
-        # --- APLICACIÓN DE VELOCIDADES Y CONTROLADOR ---
+        # --- APLICACIÓN DE VELOCIDADES Y CONTROL PID REAL ---
         evento = ''
         if self.estado == 'pasillo':
-            # PRIORIDAD MÁXIMA: Error basado en los mínimos absolutos detectados en los rangos
-            # Si d_l es grande y d_r es pequeño -> error positivo -> gira a la izquierda (+) para alejarse de la derecha
             error = d_l - d_r  
             
-            self.integral_pasillo += error * 0.1
+            # Integral calculada con el dt real de la simulación
+            self.integral_pasillo += error * dt
             self.integral_pasillo = max(min(self.integral_pasillo, 0.10), -0.10)
-            derivada = (error - self.error_anterior_pasillo) / 0.1
+            
+            # Derivada exacta basada en el tiempo real entre muestras del sensor
+            derivada = (error - self.error_anterior_pasillo) / dt
             self.error_anterior_pasillo = error
             
             salida_pid = (KP_PASILLO * error) + (KI_PASILLO * self.integral_pasillo) + (KD_PASILLO * derivada)
             
             twist.linear.x  = VEL_LINEAR_PASILLO
             twist.angular.z = max(min(salida_pid, 0.40), -0.40) 
-            evento = f'PID_RANGOS err={error:+.3f} u={twist.angular.z:+.3f}'
+            evento = f'PID_PURO dt={dt:.3f} err={error:+.3f} D={derivada:+.3f}'
             
         elif self.estado == 'girar_180':
             twist.linear.x  = 0.0
