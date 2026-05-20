@@ -9,14 +9,11 @@ import math
 import time
 
 # --- PARÁMETROS CONFIGURADOS PARA PASILLOS DE 30-35 CM ---
-DIST_PASILLO           = 0.25   # Ambos lados por debajo de esto = Pasillo
+DIST_PASILLO           = 0.25   # Un lateral < 0.25m significa que hay muro pegado
 DIST_PARED_DERECHA     = 0.16   # Centro ideal en pasillo de ~32cm
-DIST_GIRO_PASILLO      = 0.22   # Distancia al frente para actuar
-DIST_PARAR_GIRO        = 0.22   
-
-# Umbrales estrictos para callejón sin salida
-CALLEJON_FRONT         = 0.24
-CALLEJON_LATERAL       = 0.22
+DIST_PARAR_GIRO        = 0.22   # Umbral frontal de colisión para tomar una acción
+DIST_GIRO_PASILLO      = 0.22   
+UMBRAL_ABIERTO         = 0.32   # Más de esto significa que el pasillo se ha abierto
 
 # VELOCIDADES DE PRECISIÓN (Calma y control)
 VEL_LINEAR_PASILLO    = 0.03   
@@ -24,10 +21,10 @@ VEL_LINEAR_NORMAL     = 0.04
 VEL_AVANCE_GIRO       = 0.01   
 VEL_GIRO              = 0.18   
 
-# PID AGRESIVO Y SIN RETARDO PARA PASILLO
-KP_PASILLO            = 3.8    # Respuesta inmediata al descentrado
+# PID DE ALTA PRIORIDAD PARA PASILLO
+KP_PASILLO            = 3.8    
 KI_PASILLO            = 0.02   
-KD_PASILLO            = 1.6    # Amortiguación real para eliminar la oscilación
+KD_PASILLO            = 1.6    
 
 KP_NORMAL             = 1.5    
 TIEMPO_GIRO_MINIMO    = 1.5    
@@ -40,11 +37,10 @@ class MazeSolver(Node):
         super().__init__('maze_solver_node')
 
         self.cmd_pub  = self.create_publisher(Twist, '/cmd_vel', 10)
-        # Suscripción al Scan: Aquí nacerá el pulso de control del robot
         self.scan_sub = self.create_subscription(LaserScan, '/scan', self.scan_callback, 10)
         self.odom_sub = self.create_subscription(Odometry,  '/odom', self.odom_callback, 10)
 
-        # Variables de lectura instantánea (Sin deques/retardos)
+        # Variables de lectura instantánea por rango amplio
         self.d_front    = 3.0
         self.d_right    = 3.0
         self.d_left     = 3.0
@@ -55,7 +51,7 @@ class MazeSolver(Node):
         self.yaw   = 0.0
         self.yaw_inicial = 0.0
 
-        # Control de tiempo real para el PID
+        # Historial del PID
         self.sim_time             = 0.0
         self.last_sim_time        = 0.0
         self.error_anterior_pasillo = 0.0
@@ -72,7 +68,7 @@ class MazeSolver(Node):
         self.meta_alcanzada       = False
 
         self.log_file = open(LOG_FILE, 'w')
-        self._log_raw('=== INICIO SESION CONTROL SINCRONO SENSOR-MOTOR ===')
+        self._log_raw('=== INICIO SESION JERARQUÍA CORREGIDA ===')
 
     def _log_raw(self, msg):
         ts = time.strftime('%H:%M:%S')
@@ -97,7 +93,6 @@ class MazeSolver(Node):
         if len(r) < 360:
             return
         
-        # 1. MARCAR EL TIEMPO DE SIMULACIÓN Y CALCULAR DT REAL
         self.sim_time = msg.header.stamp.sec + msg.header.stamp.nanosec * 1e-9
         if self.last_sim_time == 0.0:
             self.last_sim_time = self.sim_time
@@ -107,15 +102,14 @@ class MazeSolver(Node):
         self.last_sim_time = self.sim_time
         
         if dt <= 0.0: 
-            dt = 0.05 # Salvaguarda por si el reloj se pisa
+            dt = 0.05
 
-        # 2. CAPTURAR LAS DISTANCIAS REALES INSTANTÁNEAS (CERO RETARDO)
+        # Obtención de la distancia perpendicular real mediante escaneo por abanicos (Evita el error por desalineación)
         self.d_front = min(self.sector_min(r, 350, 360), self.sector_min(r, 0, 10))
         self.d_back  = self.sector_min(r, 170, 190)
-        self.d_left  = self.sector_min(r, 60, 120)    # Rango amplio anti-giros
-        self.d_right = self.sector_min(r, 240, 300)  # Rango amplio anti-giros
+        self.d_left  = self.sector_min(r, 60, 120)    
+        self.d_right = self.sector_min(r, 240, 300)  
 
-        # 3. LANZAR EL CONTROLADOR INMEDIATAMENTE CON EL DT REAL
         self.control_loop(dt)
 
     def odom_callback(self, msg):
@@ -137,9 +131,11 @@ class MazeSolver(Node):
             self.estado = nuevo
 
     def _decidir_lado_giro(self):
-        if self.d_right > 0.35: 
+        # Si la derecha está libre por encima del umbral, giramos a la derecha (Prioridad reglamentaria)
+        if self.d_right > UMBRAL_ABIERTO: 
             lado = 'der' 
-        elif self.d_left > 0.35: 
+        # Si la derecha está bloqueada pero la izquierda está libre, giramos a la izquierda obligatoriamente
+        elif self.d_left > UMBRAL_ABIERTO: 
             lado = 'izq' 
         else:
             lado = 'der' if self.d_right >= self.d_left else 'izq'
@@ -147,7 +143,7 @@ class MazeSolver(Node):
 
     def _iniciar_giro(self, ahora):
         lado = self._decidir_lado_giro()
-        self._cambiar_estado(f'girar_{lado}', f'Cruce detectado. Lado={lado}')
+        self._cambiar_estado(f'girar_{lado}', f'Curva normal detectada. Lado={lado}')
         self.tiempo_inicio_giro = ahora
         self.giro_comprometido  = True
 
@@ -166,55 +162,16 @@ class MazeSolver(Node):
         tiempo_girando = ahora - self.tiempo_inicio_giro
         en_pasillo     = (d_r < DIST_PASILLO and d_l < DIST_PASILLO)
 
-        # --- DETECCIÓN DE CALLEJÓN ---
-        if self.estado in ('avanzar', 'pasillo'):
-            if d_f < CALLEJON_FRONT and d_l < CALLEJON_LATERAL and d_r < CALLEJON_LATERAL:
-                self._cambiar_estado('girar_180', 'CALLEJÓN CONFIRMADO')
-                self.yaw_inicial = self.yaw
-                self.tiempo_inicio_giro = ahora
-                return
-
-        # --- MÁQUINA DE ESTADOS ---
-        if self.estado == 'pasillo':
-            if en_pasillo:
-                self.ticks_fuera_pasillo = 0
-                if d_f < DIST_GIRO_PASILLO:
-                    self._iniciar_giro(ahora)
-            else:
-                self.ticks_fuera_pasillo += 1
-                if self.ticks_fuera_pasillo >= TICKS_CONFIRMACION:
-                    if d_r > DIST_PASILLO:
-                        self._cambiar_estado('girar_der', 'El pasillo se abre a la derecha')
-                        self.tiempo_inicio_giro = ahora
-                        self.giro_comprometido = True
-                    elif d_l > DIST_PASILLO:
-                        self._cambiar_estado('girar_izq', 'El pasillo se abre a la izquierda')
-                        self.tiempo_inicio_giro = ahora
-                        self.giro_comprometido = True
-                    else:
-                        self._cambiar_estado('avanzar', 'Salida neutral')
-                    self.ticks_fuera_pasillo = 0
-
-        elif self.estado == 'avanzar':
-            if en_pasillo and d_f >= DIST_GIRO_PASILLO:
-                self._cambiar_estado('pasillo', 'Entrando en pasillo')
-                self.error_anterior_pasillo = 0.0
-                self.integral_pasillo = 0.0
-                self.ticks_fuera_pasillo = 0
-            elif d_f < DIST_PARAR_GIRO:
-                self._iniciar_giro(ahora)
-            elif d_r > 0.38 and d_f > 0.30: 
-                self._cambiar_estado('girar_der', 'Muro derecho termina')
-                self.tiempo_inicio_giro = ahora
-                self.giro_comprometido = True
-
-        elif self.estado in ('girar_izq', 'girar_der'):
+        # --- MÁQUINA DE ESTADOS Y JERARQUÍA DE DISTANCIAS ---
+        
+        # 1. Si el robot está ejecutando activamente un giro, la máquina sigue su curso sin interrumpirse
+        if self.estado in ('girar_izq', 'girar_der'):
             if self.giro_comprometido:
                 if tiempo_girando >= TIEMPO_GIRO_MINIMO:
                     self.giro_comprometido = False
             else:
                 if d_f >= DIST_PARAR_GIRO + 0.08:
-                    self._cambiar_estado('avanzar', 'Frente despejado')
+                    self._cambiar_estado('avanzar', 'Frente despejado tras curva')
                 elif d_f < DIST_PARAR_GIRO - 0.04:
                     self._iniciar_giro(ahora)
 
@@ -227,16 +184,56 @@ class MazeSolver(Node):
             elif tiempo_girando > 8.0 and d_f > 0.35:
                 self._cambiar_estado('avanzar', 'Giro 180 abortado')
 
-        # --- APLICACIÓN DE VELOCIDADES Y CONTROL PID REAL ---
+        # 2. Si NO está girando (está navegando en línea recta), evaluamos la jerarquía de sensores
+        else:
+            # PRIMER FILTRO JERÁRQUICO: Muro al frente detectado
+            if d_f < DIST_PARAR_GIRO:
+                # Desambiguación inmediata basada en el entorno real de pasillo:
+                if d_r < DIST_PASILLO and d_l < DIST_PASILLO:
+                    # Ambos lados cerrados de forma claustrofóbica -> ¡Es un callejón sin salida real!
+                    self._cambiar_estado('girar_180', 'CALLEJÓN CONFIRMADO: Frente y laterales cerrados')
+                    self.yaw_inicial = self.yaw
+                    self.tiempo_inicio_giro = ahora
+                else:
+                    # Uno de los lados está libre -> Es una esquina o intersección normal
+                    self._iniciar_giro(ahora)
+            
+            # SEGUNDO FILTRO JERÁRQUICO: Navegación con frente libre
+            elif self.estado == 'pasillo':
+                if en_pasillo:
+                    self.ticks_fuera_pasillo = 0
+                else:
+                    self.ticks_fuera_pasillo += 1
+                    if self.ticks_fuera_pasillo >= TICKS_CONFIRMACION:
+                        if d_r > UMBRAL_ABIERTO:
+                            self._cambiar_estado('girar_der', 'El pasillo termina abriéndose a la derecha')
+                            self.tiempo_inicio_giro = ahora
+                            self.giro_comprometido = True
+                        elif d_l > UMBRAL_ABIERTO:
+                            self._cambiar_estado('girar_izq', 'El pasillo termina abriéndose a la izquierda')
+                            self.tiempo_inicio_giro = ahora
+                            self.giro_comprometido = True
+                        else:
+                            self._cambiar_estado('avanzar', 'Salida neutral de pasillo')
+                        self.ticks_fuera_pasillo = 0
+                        
+            elif self.estado == 'avanzar':
+                if en_pasillo:
+                    self._cambiar_estado('pasillo', 'Configuración de pasillo detectada')
+                    self.error_anterior_pasillo = 0.0
+                    self.integral_pasillo = 0.0
+                    self.ticks_fuera_pasillo = 0
+                elif d_r > UMBRAL_ABIERTO and d_f > 0.30: 
+                    self._cambiar_estado('girar_der', 'Muro derecho finalizado en zona abierta')
+                    self.tiempo_inicio_giro = ahora
+                    self.giro_comprometido = True
+
+        # --- ENVÍO DE VELOCIDADES ---
         evento = ''
         if self.estado == 'pasillo':
             error = d_l - d_r  
-            
-            # Integral calculada con el dt real de la simulación
             self.integral_pasillo += error * dt
             self.integral_pasillo = max(min(self.integral_pasillo, 0.10), -0.10)
-            
-            # Derivada exacta basada en el tiempo real entre muestras del sensor
             derivada = (error - self.error_anterior_pasillo) / dt
             self.error_anterior_pasillo = error
             
@@ -244,7 +241,7 @@ class MazeSolver(Node):
             
             twist.linear.x  = VEL_LINEAR_PASILLO
             twist.angular.z = max(min(salida_pid, 0.40), -0.40) 
-            evento = f'PID_PURO dt={dt:.3f} err={error:+.3f} D={derivada:+.3f}'
+            evento = f'PID_PASILLO err={error:+.3f}'
             
         elif self.estado == 'girar_180':
             twist.linear.x  = 0.0
@@ -261,16 +258,16 @@ class MazeSolver(Node):
             twist.angular.z = -VEL_GIRO
             evento = 'Curva Derecha'
             
-        else:  
+        else:  # avanzar (seguimiento de pared derecha fuera de pasillo)
             if d_r > 0.45:
                 twist.linear.x  = VEL_LINEAR_NORMAL
                 twist.angular.z = -0.12 
-                evento = 'Buscando muro'
+                evento = 'Buscando contacto con muro'
             else:
                 error_pared = DIST_PARED_DERECHA - d_r
                 twist.linear.x  = VEL_LINEAR_NORMAL
                 twist.angular.z = max(min(KP_NORMAL * error_pared, 0.22), -0.22)
-                evento = f'Pared der err={error_pared:+.3f}'
+                evento = f'Siguiendo pared der err={error_pared:+.3f}'
 
         self.cmd_pub.publish(twist)
         self._log_tick(evento)
