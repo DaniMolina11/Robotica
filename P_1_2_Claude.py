@@ -10,8 +10,8 @@ import time
 from collections import deque
 
 # --- PARÁMETROS RESTAURADOS Y COORDINADOS ---
-DIST_GIRO_PASILLO      = 0.24   # RESTAURADO: Tu distancia perfecta de giro
-DIST_PARAR_GIRO        = 0.24   # RESTAURADO: Tu distancia perfecta de giro
+DIST_GIRO_PASILLO      = 0.24   # Tu distancia perfecta de giro
+DIST_PARAR_GIRO        = 0.24   # Tu distancia perfecta de giro
 DIST_FRENAR            = 0.55   
 DIST_PARED_DERECHA     = 0.25   
 DIST_PASILLO           = 0.45   
@@ -70,7 +70,7 @@ class MazeSolver(Node):
         self.DISTANCIA_MINIMA_META = 0.25
         self.meta_alcanzada       = False
 
-        self.sim_time    = 0.0
+        self.sim_time = 0.0
         self.vel_lin_pub = 0.0
         self.vel_ang_pub = 0.0
 
@@ -213,10 +213,9 @@ class MazeSolver(Node):
         en_pasillo     = (d_r < DIST_PASILLO and d_l < DIST_PASILLO)
 
         # -------------------------------------------------------------------
-        # RADAR DE CALLEJÓN ABSOLUTO (SÓLO SI PASA DE TU DISTANCIA DE GIRO)
+        # RADAR DE CALLEJÓN ABSOLUTO
         # -------------------------------------------------------------------
         if self.estado != 'giro_180':
-            # Solo saltará si ignora el giro a 0.24m porque está encajonado a 0.18m
             tiene_muro_delante   = (d_f <= 0.18)
             tiene_muro_izquierda = (d_l < 0.32)
             tiene_muro_derecha   = (d_r < 0.32)
@@ -232,7 +231,6 @@ class MazeSolver(Node):
         # MAQUINA DE ESTADOS
         # -------------------------------------------------------------------
         if self.estado == 'giro_180':
-            # ESTADO BLOQUEANTE TOTAL
             if tiempo_girando >= 5.6:
                 self._cambiar_estado('avanzar', 'Giro completo de 180 grados terminado con exito')
                 self.reset_filtros()
@@ -299,10 +297,13 @@ class MazeSolver(Node):
             twist.angular.z = -VEL_GIRO
             evento = f'girar_der arco={twist.linear.x>0} t={tiempo_girando:.1f}s'
             
-        else:  # avanzar (Mecanismo PID centrado inteligente en pasillos)
+        else:  # avanzar
             vel = self.velocidad_frenada(d_f, VEL_LINEAR_NORMAL)
             twist.linear.x = vel
-            if d_r < DIST_PASILLO and d_l < DIST_PASILLO:
+            
+            # --- MODIFICADO: Tolerancia de centrado ampliada a 0.55m ---
+            # Al darle más rango, el robot no apagará el PID simétrico aunque oscile ligeramente
+            if d_r < 0.55 and d_l < 0.55:
                 error_centrado = d_l - d_r
                 twist.angular.z = max(min(KP * error_centrado, 0.40), -0.40)
                 evento = f'centrando_en_pasillo err={error_centrado:.3f} vel={vel:.3f}'
