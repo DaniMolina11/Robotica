@@ -9,9 +9,9 @@ import math
 import time
 from collections import deque
 
-# --- PARÁMETROS DE TU CÓDIGO ORIGINAL ---
-DIST_GIRO_PASILLO      = 0.32   
-DIST_PARAR_GIRO        = 0.32
+# --- PARÁMETROS REAJUSTADOS Y COORDINADOS ---
+DIST_GIRO_PASILLO      = 0.30   # Bajado ligeramente para coordinar con el frente
+DIST_PARAR_GIRO        = 0.30   # Umbral de giro normal
 DIST_FRENAR            = 0.55   
 DIST_PARED_DERECHA     = 0.25   
 DIST_PASILLO           = 0.45   
@@ -213,34 +213,32 @@ class MazeSolver(Node):
         en_pasillo     = (d_r < DIST_PASILLO and d_l < DIST_PASILLO)
 
         # -------------------------------------------------------------------
-        # RADAR DE CALLEJÓN ABSOLUTO (Manda sobre cualquier estado)
+        # RADAR DE CALLEJÓN ABSOLUTO (JERARQUÍA CORREGIDA: SÓLO EN EXTREMO)
         # -------------------------------------------------------------------
         if self.estado != 'giro_180':
-            # Si el frente está bloqueado (tolerancia subida a 0.35m para capturarlo antes de que gire)
-            # Y además el pasillo está cerrado a izquierda y derecha (menos de 0.38m de margen lateral)
-            tiene_muro_delante   = (d_f <= 0.35)
-            tiene_muro_izquierda = (d_l < 0.38)
-            tiene_muro_derecha   = (d_r < 0.38)
+            # El callejón solo se confirma si se mete hasta el fondo (0.22m)
+            # y ambos laterales están obstruidos (menos de 0.32m)
+            tiene_muro_delante   = (d_f <= 0.22)
+            tiene_muro_izquierda = (d_l < 0.32)
+            tiene_muro_derecha   = (d_r < 0.32)
 
             if tiene_muro_delante and tiene_muro_izquierda and tiene_muro_derecha:
-                self._cambiar_estado('giro_180', 'CRÍTICO: Callejón sin salida detectado por triple pared')
+                self._cambiar_estado('giro_180', 'CRÍTICO: Callejón sin salida confirmado por encajonamiento')
                 self.tiempo_inicio_giro = ahora
                 self.giro_comprometido = False
                 self.reset_filtros()
                 return
 
         # -------------------------------------------------------------------
-        # MAQUINA DE ESTADOS REVISADA
+        # MAQUINA DE ESTADOS
         # -------------------------------------------------------------------
         if self.estado == 'giro_180':
-            # ESTADO BLOQUEANTE TOTAL: No escucha a nada ni a nadie hasta cumplir el tiempo de rotación
-            # Con tu VEL_GIRO = 0.28 rad/s, tarda exactamente 5.6 segundos en rotar 180 grados reales
+            # ESTADO BLOQUEANTE TOTAL
             if tiempo_girando >= 5.6:
-                self._cambiar_estado('avanzar', 'Giro bloqueante de 180 grados completado')
+                self._cambiar_estado('avanzar', 'Giro completo de 180 grados terminado con exito')
                 self.reset_filtros()
         
         else:
-            # Lógica secuencial normal de navegación
             if self.estado == 'pasillo':
                 if en_pasillo:
                     self.ticks_fuera_pasillo = 0
@@ -283,8 +281,8 @@ class MazeSolver(Node):
             evento = f'pasillo_recto f={d_f:.2f}'
             
         elif self.estado == 'giro_180':
-            twist.linear.x = 0.0        # Clavado en el sitio, sin avances peligrosos
-            twist.angular.z = VEL_GIRO  # Pivotaje puro tipo compás
+            twist.linear.x = 0.0        
+            twist.angular.z = VEL_GIRO  
             evento = f'PEONZA_BLOQUEANTE_ACTIVA t={tiempo_girando:.1f}s'
             
         elif self.estado == 'escape':
@@ -302,7 +300,7 @@ class MazeSolver(Node):
             twist.angular.z = -VEL_GIRO
             evento = f'girar_der arco={twist.linear.x>0} t={tiempo_girando:.1f}s'
             
-        else:  # avanzar con centrado automático por lectura combinada izquierda/derecha
+        else:  # avanzar (Mecanismo PID centrado inteligente en pasillos)
             vel = self.velocidad_frenada(d_f, VEL_LINEAR_NORMAL)
             twist.linear.x = vel
             if d_r < DIST_PASILLO and d_l < DIST_PASILLO:
