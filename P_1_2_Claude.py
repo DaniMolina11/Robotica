@@ -5,8 +5,10 @@ from rclpy.node import Node
 from geometry_msgs.msg import Twist
 from sensor_msgs.msg import LaserScan
 from nav_msgs.msg import Odometry
+from rclpy.qos import qos_profile_sensor_data
 import math
 import time
+from collections import deque
 
 # --- PARÁMETROS DE REFUERZO DE LÍNEA RECTA A 15 CM ---
 DIST_PARED_DERECHA     = 0.15   # REQUERIMIENTO: Referencia fija y absoluta a 15 cm
@@ -36,7 +38,7 @@ class MazeSolver(Node):
         super().__init__('maze_solver_node')
 
         self.cmd_pub  = self.create_publisher(Twist, '/cmd_vel', 10)
-        self.scan_sub = self.create_subscription(LaserScan, '/scan', self.scan_callback, 10)
+        self.scan_sub = self.create_subscription(LaserScan, '/scan', self.scan_callback, qos_profile_sensor_data)
         self.odom_sub = self.create_subscription(Odometry,  '/odom', self.odom_callback, 10)
         
         # TIMER ULTRA-RÁPIDO: Trayectoria a 50 Hz (Cada 0.02 segundos)
@@ -72,8 +74,8 @@ class MazeSolver(Node):
         self.meta_alcanzada       = False
         self.sim_time             = 0.0
 
-        self.log_file = open(LOG_FILE, 'w')
-        self._log_raw('=== INICIO SESION: RECTAS A 15CM FIJOS ===')
+        # self.log_file = open(LOG_FILE, 'w')
+        # self._log_raw('=== INICIO SESION: RECTAS A 15CM FIJOS ===')
 
     def _log_raw(self, msg):
         ts = time.strftime('%H:%M:%S')
