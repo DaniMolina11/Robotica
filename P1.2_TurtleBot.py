@@ -11,7 +11,7 @@ import math
 import time
 from collections import deque
 
-# --- PARÁMETROS OPTIMIZADOS PARA EL ENTORNO REAL ---
+# --- PARÁMETROS OPTIMIZADOS PARA EL LABERINTO REAL ---
 DIST_GIRO_PASILLO      = 0.24   # Tu distancia perfecta de giro
 DIST_PARAR_GIRO        = 0.24   # Tu distancia perfecta de giro
 DIST_FRENAR            = 0.55   
@@ -79,7 +79,12 @@ class MazeSolver(Node):
         self.get_logger().info('=== NODO MAZE SOLVER INICIADO COMPLETO ===')
 
     def clean(self, v):
-        return 3.0 if (math.isinf(v) or math.isnan(v)) else float(v)
+        # --- FILTRO CRÍTICO DE HARDWARE REAL ---
+        # Si el valor es inf, nan o menor/igual a 5cm, significa "fuera de rango" o "rayo perdido".
+        # Lo convertimos en 3.0m (camino libre abierto) para que no provoque falsos giros de 180.
+        if math.isinf(v) or math.isnan(v) or v <= 0.05:
+            return 3.0
+        return float(v)
 
     def sector_min(self, ranges, a, b):
         return min(self.clean(ranges[i]) for i in range(a, b))
@@ -113,8 +118,7 @@ class MazeSolver(Node):
         if len(r) < 360:
             return
             
-        # --- CORRECCIÓN INTEGRAL EN EL LÁSER REAL (EVITA PILARES Y CABLES) ---
-        # Pasamos de min() a un promedio robusto de sector para limpiar ruidos espaciales
+        # Filtros por sectores promediados aplicando la nueva limpieza del hardware real
         front_rays = [self.clean(r[i]) for i in range(355, 360)] + [self.clean(r[i]) for i in range(0, 5)]
         self.buf_front.append(sum(front_rays) / len(front_rays))
         
@@ -191,9 +195,8 @@ class MazeSolver(Node):
         tiempo_girando = ahora - self.tiempo_inicio_giro
         en_pasillo     = (d_r < DIST_PASILLO and d_l < DIST_PASILLO)
 
-        # --- TELEMETRÍA EN CONSOLA PARA COMPROBAR EL LIDAR EN DIRECTO ---
-        # Pon el robot en el pasillo abierto de clase y lee estos números en la pantalla:
-        self.get_logger().info(f"TELEMETRIA -> Estado: {self.estado} | F: {d_f:.2f} | R: {d_r:.2f} | L: {d_l:.2f} | B: {self.d_back:.2f}")
+        # Imprime la telemetría real limpia en vuestro terminal de clase
+        self.get_logger().info(f"TELEMETRIA REAL -> Estado: {self.estado} | F: {d_f:.2f} | R: {d_r:.2f} | L: {d_l:.2f}")
 
         # -------------------------------------------------------------------
         # RADAR DE CALLEJÓN ABSOLUTO
@@ -204,7 +207,7 @@ class MazeSolver(Node):
             tiene_muro_derecha   = (d_r < 0.32)
 
             if tiene_muro_delante and tiene_muro_izquierda and tiene_muro_derecha:
-                self._cambiar_estado('giro_180', 'CRÍTICO: Callejón sin salida (activando peonza bloqueante)')
+                self._cambiar_estado('giro_180', 'CRÍTICO: Callejón sin salida detectado')
                 self.tiempo_inicio_giro = ahora
                 self.giro_comprometido = False
                 self.reset_filtros()
