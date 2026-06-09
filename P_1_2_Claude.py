@@ -5,13 +5,13 @@ from rclpy.node import Node
 from geometry_msgs.msg import Twist
 from sensor_msgs.msg import LaserScan
 from nav_msgs.msg import Odometry
-# --- PERFIL QoS Estándar para Redes de Sensores en Robots Reales ---
+# --- PERFIL QoS Estándar para Redes de Robots Reales ---
 from rclpy.qos import qos_profile_sensor_data
 import math
 import time
 from collections import deque
 
-# --- PARÁMETROS RESTAURADOS Y COORDINADOS ---
+# --- PARÁMETROS REAJUSTADOS Y COORDINADOS ---
 DIST_GIRO_PASILLO      = 0.24   # Tu distancia perfecta de giro
 DIST_PARAR_GIRO        = 0.24   # Tu distancia perfecta de giro
 DIST_FRENAR            = 0.55   
@@ -32,21 +32,14 @@ TIEMPO_GIRO_MINIMO    = 1.5
 N_LECTURAS_PROMEDIO   = 5
 TICKS_CONFIRMACION    = 4
 
-LOG_FILE = '/home/ros/Escriptori/Robotica/maze_log.txt'
-
 class MazeSolver(Node):
     def __init__(self):
         super().__init__('maze_solver_node')
 
-        # --- CORRECCIÓN QoS: Aplicado también al publicador de velocidad ---
+        # --- CONFIGURACIÓN QoS COMPATIBLE CON ROBOT REAL ---
         self.cmd_pub  = self.create_publisher(Twist, '/cmd_vel', qos_profile_sensor_data)
-        
-        # --- CORRECCIÓN QoS: Aplicado al suscriptor del láser ---
         self.scan_sub = self.create_subscription(LaserScan, '/scan', self.scan_callback, qos_profile_sensor_data)
-        
-        # --- CORRECCIÓN QoS: Aplicado al suscriptor de la odometría ---
         self.odom_sub = self.create_subscription(Odometry,  '/odom', self.odom_callback, qos_profile_sensor_data)
-        
         self.timer    = self.create_timer(0.1, self.control_loop)
 
         self.buf_front    = deque(maxlen=N_LECTURAS_PROMEDIO)
@@ -83,39 +76,7 @@ class MazeSolver(Node):
         self.vel_lin_pub = 0.0
         self.vel_ang_pub = 0.0
 
-        self.log_file = open(LOG_FILE, 'w')
-        self._log_raw('=== INICIO SESION MAZE SOLVER ===')
-        self._log_raw(
-            f'Params: DIST_GIRO={DIST_GIRO_PASILLO} DIST_PARAR={DIST_PARAR_GIRO} '
-            f'VEL_NORMAL={VEL_LINEAR_NORMAL} VEL_GIRO={VEL_GIRO} VEL_AVANCE_GIRO={VEL_AVANCE_GIRO}'
-        )
-        self._log_raw(
-            'TSIM      | POS_X  | POS_Y  | ESTADO       | '
-            'F     | R     | L     | DI    | DD    | VL      | VA      | EVENTO'
-        )
-        self._log_raw('-' * 130)
-
-    def _log_raw(self, msg):
-        ts = time.strftime('%H:%M:%S')
-        self.log_file.write(f'[{ts}] {msg}\n')
-        self.log_file.flush()
-
-    def _log_tick(self, evento=''):
-        self._log_raw(
-            f'{self.sim_time:9.2f} | {self.pos_x:+6.3f} | {self.pos_y:+6.3f} | '
-            f'{self.estado:<13}| '
-            f'{self.d_front:5.2f} | {self.d_right:5.2f} | {self.d_left:5.2f} | '
-            f'{self.d_diag_izq:5.2f} | {self.d_diag_der:5.2f} | '
-            f'{self.vel_lin_pub:+7.3f} | {self.vel_ang_pub:+7.3f} | {evento}'
-        )
-
-    def _log_evento(self, msg):
-        self._log_raw(
-            f'*** {msg} | estado={self.estado} '
-            f'pos=({self.pos_x:.3f},{self.pos_y:.3f}) '
-            f'F={self.d_front:.2f} R={self.d_right:.2f} L={self.d_left:.2f} '
-            f'DI={self.d_diag_izq:.2f} DD={self.d_diag_der:.2f}'
-        )
+        self.get_logger().info('=== NODO MAZE SOLVER INICIADO COMPLETO ===')
 
     def clean(self, v):
         return 3.0 if (math.isinf(v) or math.isnan(v)) else float(v)
@@ -152,6 +113,7 @@ class MazeSolver(Node):
         if len(r) < 360:
             return
             
+        # Filtros por sectores para el LiDAR real
         self.buf_front.append(min(self.sector_min(r, 355, 360), self.sector_min(r, 0, 5)))
         self.buf_right.append(self.sector_promedio(r, 265, 275)) 
         self.buf_left.append(self.sector_promedio(r, 85, 95))    
@@ -179,11 +141,11 @@ class MazeSolver(Node):
         dist = math.sqrt((self.pos_x - self.META_X)**2 + (self.pos_y - self.META_Y)**2)
         if dist < self.DISTANCIA_MINIMA_META and not self.meta_alcanzada:
             self.meta_alcanzada = True
-            self._log_evento(f'META ALCANZADA dist={dist:.3f}')
+            self.get_logger().info(f'*** META ALCANZADA! Distancia a meta: {dist:.3f}m')
 
     def _cambiar_estado(self, nuevo, motivo=''):
         if nuevo != self.estado:
-            self._log_evento(f'ESTADO {self.estado} -> {nuevo}  [{motivo}]')
+            self.get_logger().info(f'*** CAMBIO ESTADO: {self.estado} -> {nuevo} [{motivo}]')
             self.estado_anterior = self.estado
             self.estado = nuevo
 
@@ -191,13 +153,8 @@ class MazeSolver(Node):
         en_pasillo = (self.d_right < DIST_PASILLO and self.d_left < DIST_PASILLO)
         if en_pasillo:
             lado = 'izq' if self.d_diag_izq >= self.d_diag_der else 'der'
-            self._log_evento(
-                f'Giro en PASILLO por diagonal: lado={lado} '
-                f'DI={self.d_diag_izq:.2f} DD={self.d_diag_der:.2f}'
-            )
         else:
             lado = 'izq' if self.d_left >= self.d_right else 'der'
-            self._log_evento(f'Giro NORMAL: lado={lado}')
         return lado
 
     def _iniciar_giro(self, ahora):
@@ -210,12 +167,10 @@ class MazeSolver(Node):
         twist = Twist()
 
         if self.meta_alcanzada:
-            self._log_tick('META - detenido')
             self.cmd_pub.publish(twist)
             return
 
         if self.lecturas_acumuladas < N_LECTURAS_PROMEDIO:
-            self._log_tick(f'acumulando {self.lecturas_acumuladas}/{N_LECTURAS_PROMEDIO}')
             self.cmd_pub.publish(twist)
             return
 
@@ -228,7 +183,6 @@ class MazeSolver(Node):
         d_di = self.d_diag_izq
         d_dd = self.d_diag_der
 
-        ahoraStr = time.strftime('%H:%M:%S')
         ahora          = time.time()
         tiempo_girando = ahora - self.tiempo_inicio_giro
         en_pasillo     = (d_r < DIST_PASILLO and d_l < DIST_PASILLO)
@@ -242,7 +196,7 @@ class MazeSolver(Node):
             tiene_muro_derecha   = (d_r < 0.32)
 
             if tiene_muro_delante and tiene_muro_izquierda and tiene_muro_derecha:
-                self._cambiar_estado('giro_180', 'CRÍTICO: Callejón sin salida confirmado por encajonamiento')
+                self._cambiar_estado('giro_180', 'CRÍTICO: Callejón sin salida (activando peonza bloqueante)')
                 self.tiempo_inicio_giro = ahora
                 self.giro_comprometido = False
                 self.reset_filtros()
@@ -292,31 +246,25 @@ class MazeSolver(Node):
         # -------------------------------------------------------------------
         # APLICACIÓN DE VELOCIDADES MOTOR
         # -------------------------------------------------------------------
-        evento = ''
         if self.estado == 'pasillo':
             twist.linear.x  = VEL_LINEAR_PASILLO
             twist.angular.z = 0.0
-            evento = f'pasillo_recto f={d_f:.2f}'
             
         elif self.estado == 'giro_180':
             twist.linear.x = 0.0        
             twist.angular.z = VEL_GIRO  
-            evento = f'PEONZA_BLOQUEANTE_ACTIVA t={tiempo_girando:.1f}s'
             
         elif self.estado == 'escape':
             twist.linear.x  = -0.05
             twist.angular.z = VEL_GIRO
-            evento = 'escape'
             
         elif self.estado == 'girar_izq':
             twist.linear.x  = VEL_AVANCE_GIRO if d_f > 0.22 else 0.0
             twist.angular.z = VEL_GIRO
-            evento = f'girar_izq arco={twist.linear.x>0} t={tiempo_girando:.1f}s'
             
-        elif self.estado == 'girar_der':
+        elif self.estado == 'grid_der' or self.estado == 'girar_der':
             twist.linear.x  = VEL_AVANCE_GIRO if d_f > 0.22 else 0.0
             twist.angular.z = -VEL_GIRO
-            evento = f'girar_der arco={twist.linear.x>0} t={tiempo_girando:.1f}s'
             
         else:  # avanzar
             vel = self.velocidad_frenada(d_f, VEL_LINEAR_NORMAL)
@@ -328,41 +276,25 @@ class MazeSolver(Node):
                 
                 giro_total = (KP * error_centrado) + (KD_ALINEAR * error_angular)
                 twist.angular.z = max(min(giro_total, 0.35), -0.35) 
-                evento = f'centrando_y_alineando err_c={error_centrado:.2f} err_a={error_angular:.2f}'
             
             elif d_r < 0.50 and d_l >= 0.50:
                 error = DIST_PARED_DERECHA - d_r
                 twist.angular.z = max(min(KP * error, 0.25), -0.25)
-                evento = f'interseccion_izq: siguiendo_pared_der err={error:.3f}'
             
             elif d_l < 0.40 and d_r >= 0.50:
                 error = d_l - DIST_PARED_DERECHA  
                 twist.angular.z = max(min(KP * error, 0.25), -0.25)
-                evento = f'interseccion_der: siguiendo_pared_izq err={error:.3f}'
                 
             else:
                 if d_r > 1.2:
                     twist.angular.z = -0.15
-                    evento = f'buscando_pared vel={vel:.3f}'
                 else:
                     error = DIST_PARED_DERECHA - d_r
                     twist.angular.z = max(min(KP * error, 0.25), -0.25)
-                    evento = f'siguiendo_pared_der_abierta err={error:.3f}'
-                    
-            if vel < VEL_LINEAR_NORMAL:
-                evento += ' FRENANDO'
 
         self.vel_lin_pub = twist.linear.x
         self.vel_ang_pub = twist.angular.z
-        self._log_tick(evento)
         self.cmd_pub.publish(twist)
-
-    def __del__(self):
-        try:
-            self._log_raw('=== FIN SESION ===')
-            self.log_file.close()
-        except Exception:
-            pass
 
 def main(args=None):
     rclpy.init(args=args)
@@ -372,12 +304,9 @@ def main(args=None):
     except KeyboardInterrupt:
         pass
     finally:
-        nodo._log_raw('=== INTERRUPCION USUARIO ===')
         nodo.cmd_pub.publish(Twist())
-        nodo.log_file.close()
         nodo.destroy_node()
         rclpy.shutdown()
 
 if __name__ == '__main__':
     main()
-
