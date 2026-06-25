@@ -56,6 +56,7 @@ class MazeSolver(Node):
 
         self.pos_x = 0.0
         self.pos_y = 0.0
+        self.yaw   = 0.0  # NUEVO: Seguimiento de orientación angular para la proyección de caminos
         self.lecturas_acumuladas = 0
 
         self.estado          = 'esperando'
@@ -64,6 +65,13 @@ class MazeSolver(Node):
         self.tiempo_inicio_giro      = 0.0
         self.giro_comprometido       = False
         self.ticks_fuera_pasillo     = 0
+
+        # NUEVO: Controladores para evitar colisiones en esquinas al retroceder
+        self.tiempo_deteccion_salida = 0.0
+        self.lado_salida_calculado   = 'izq'
+
+        # NUEVO: Memoria para descartar sectores y callejones sin salida completados
+        self.dead_ends = []
 
         self.META_X               = 2.75
         self.META_Y               = 1.71
@@ -75,14 +83,14 @@ class MazeSolver(Node):
         self.vel_ang_pub = 0.0
 
         self.log_file = open(LOG_FILE, 'w')
-        self._log_raw('=== INICIO SESION MAZE SOLVER ===')
+        self._log_raw('=== INICIO SESION MAZE SOLVER CON MEMORIA ===')
         self._log_raw(
             f'Params: DIST_GIRO={DIST_GIRO_PASILLO} DIST_PARAR={DIST_PARAR_GIRO} '
             f'VEL_NORMAL={VEL_LINEAR_NORMAL} VEL_GIRO={VEL_GIRO} VEL_AVANCE_GIRO={VEL_AVANCE_GIRO}'
         )
         self._log_raw(
             'TSIM      | POS_X  | POS_Y  | ESTADO       | '
-            'F     | R     | L     | DI    | DD    | VL      | VA      | EVENTO'
+            'F     | R     | L     | VL      | VA      | EVENTO'
         )
         self._log_raw('-' * 130)
 
@@ -96,7 +104,6 @@ class MazeSolver(Node):
             f'{self.sim_time:9.2f} | {self.pos_x:+6.3f} | {self.pos_y:+6.3f} | '
             f'{self.estado:<13}| '
             f'{self.d_front:5.2f} | {self.d_right:5.2f} | {self.d_left:5.2f} | '
-            f'{self.d_diag_izq:5.2f} | {self.d_diag_der:5.2f} | '
             f'{self.vel_lin_pub:+7.3f} | {self.vel_ang_pub:+7.3f} | {evento}'
         )
 
@@ -104,8 +111,7 @@ class MazeSolver(Node):
         self._log_raw(
             f'*** {msg} | estado={self.estado} '
             f'pos=({self.pos_x:.3f},{self.pos_y:.3f}) '
-            f'F={self.d_front:.2f} R={self.d_right:.2f} L={self.d_left:.2f} '
-            f'DI={self.d_diag_izq:.2f} DD={self.d_diag_der:.2f}'
+            f'F={self.d_front:.2f} R={self.d_right:.2f} L={self.d_left:.2f}'
         )
 
     def clean(self, v):
@@ -138,8 +144,7 @@ class MazeSolver(Node):
         r = msg.ranges
         if len(r) < 360:
             return
-        self.buf_front.append(min(self.sector_min(r, 350, 360),
-                                  self.sector_min(r,   0,  10)))
+        self.buf_front.append(min(self.sector_min(r, 350, 360), self.sector_min(r, 0, 10)))
         self.buf_right.append(   self.sector_min(r, 260, 310))
         self.buf_left.append(    self.sector_min(r,  50, 110))
         self.buf_back.append(    self.sector_min(r, 170, 190))
@@ -157,6 +162,13 @@ class MazeSolver(Node):
     def odom_callback(self, msg):
         self.pos_x = msg.pose.pose.position.x
         self.pos_y = msg.pose.pose.position.y
+        
+        # Extracción precisa del Yaw (Orientación) desde el cuaternión de odometría
+        q = msg.pose.pose.orientation
+        siny_cosp = 2.0 * (q.w * q.z + q.x * q.y)
+        cosy_cosp = 1.0 - 2.0 * (q.y * q.y + q.z * q.z)
+        self.yaw = math.atan2(siny_cosp, cosy_cosp)
+
         dist = math.sqrt((self.pos_x - self.META_X)**2 + (self.pos_y - self.META_Y)**2)
         if dist < self.DISTANCIA_MINIMA_META and not self.meta_alcanzada:
             self.meta_alcanzada = True
@@ -168,17 +180,35 @@ class MazeSolver(Node):
             self.estado_anterior = self.estado
             self.estado = nuevo
 
+    def _ruta_conduce_a_callejon(self, angulo_relativo):
+        """NUEVO: Proyecta una posición lookahead para verificar si un camino está en la blacklist"""
+        ang_pred = self.yaw + angulo_relativo
+        # Proyectamos un punto virtual a 0.6 metros en la dirección deseada
+        x_pred = self.pos_x + 0.6 * math.cos(ang_pred)
+        y_pred = self.pos_y + 0.6 * math.sin(ang_pred)
+        
+        for cx, cy in self.dead_ends:
+            if math.sqrt((x_pred - cx)**2 + (y_pred - cy)**2) < 0.45:
+                return True
+        return False
+
     def _decidir_lado_giro(self):
         en_pasillo = (self.d_right < DIST_PASILLO and self.d_left < DIST_PASILLO)
         if en_pasillo:
             lado = 'izq' if self.d_diag_izq >= self.d_diag_der else 'der'
-            self._log_evento(
-                f'Giro en PASILLO por diagonal: lado={lado} '
-                f'DI={self.d_diag_izq:.2f} DD={self.d_diag_der:.2f}'
-            )
+            self._log_evento(f'Giro en PASILLO por diagonal: lado={lado}')
         else:
             lado = 'izq' if self.d_left >= self.d_right else 'der'
             self._log_evento(f'Giro NORMAL: lado={lado}')
+        
+        # EVITAR BUCLES: Validamos que la decisión tomada no nos meta en un callejón conocido
+        if lado == 'izq' and self._ruta_conduce_a_callejon(math.pi/2):
+            self._log_evento('ANTIBUCLE: Descartando IZQUIERDA por estar bloqueado en memoria -> Forzando DER')
+            lado = 'der'
+        elif lado == 'der' and self._ruta_conduce_a_callejon(-math.pi/2):
+            self._log_evento('ANTIBUCLE: Descartando DERECHA por estar bloqueado en memoria -> Forzando IZQ')
+            lado = 'izq'
+
         return lado
 
     def _iniciar_giro(self, ahora):
@@ -207,19 +237,24 @@ class MazeSolver(Node):
         d_r = self.d_right
         d_l = self.d_left
 
-        ahoraStr = time.strftime('%H:%M:%S')
         ahora          = time.time()
         tiempo_girando = ahora - self.tiempo_inicio_giro
         en_pasillo     = (d_r < DIST_PASILLO and d_l < DIST_PASILLO)
 
         # --- REGLA PROTEGIDA EN LÍNEA RECTA ---
         if self.estado in ('avanzar', 'pasillo'):
-            # Ajustado a 0.24 para capturar el callejón con suficiente margen
             callejon_muerto = (d_f <= 0.24 and d_l < 0.30 and d_r < 0.30)
             if callejon_muerto:
                 self._cambiar_estado('retroceder', 'callejon detectado (frente y laterales bloqueados)')
+                
+                # MEMORIA ANTIBUCLE: Registramos este sector exacto como muerto para siempre
+                if (self.pos_x, self.pos_y) not in self.dead_ends:
+                    self.dead_ends.append((self.pos_x, self.pos_y))
+                    self._log_evento(f'ZONA AGREGADA A BLACKLIST: ({self.pos_x:.2f}, {self.pos_y:.2f})')
+                
                 self.giro_comprometido = False
-                self.reset_filtros()  # NUEVO: Vaciamos los buffers antiguos para que el láser responda al milisegundo
+                self.tiempo_deteccion_salida = 0.0  # Reset temporizador de escape seguro
+                self.reset_filtros()  
                 return
 
         if self.estado in ('avanzar', 'pasillo'):
@@ -229,6 +264,7 @@ class MazeSolver(Node):
             if esquina_cerrada:
                 self._cambiar_estado('retroceder', 'emergencia: esquina cerrada')
                 self.giro_comprometido = False
+                self.tiempo_deteccion_salida = 0.0
                 self.reset_filtros()
                 return
 
@@ -252,12 +288,19 @@ class MazeSolver(Node):
                 self._iniciar_giro(ahora)
 
         elif self.estado == 'retroceder':
-            # Buscamos la salida del callejón basándonos en datos instantáneos limpios
-            if self.d_left > 0.40 or self.d_right > 0.40:
-                lado = 'izq' if self.d_left > self.d_right else 'der'
-                self._cambiar_estado(f'girar_{lado}', f'salida trasera encontrada hacia {lado}')
-                self.tiempo_inicio_giro = ahora
-                self.giro_comprometido  = True
+            # CORRECCIÓN DE COLISIÓN TRASERA: Retraso síncrono para limpiar la esquina del morro antes de girar
+            if self.tiempo_deteccion_salida == 0.0:
+                if d_l > 0.40 or d_r > 0.40:
+                    self.tiempo_deteccion_salida = ahora
+                    self.lado_salida_calculado = 'izq' if d_l > d_r else 'der'
+                    self._log_evento(f'Salida vista a la {self.lado_salida_calculado}. Retrasando acción 0.8s para salvar morro.')
+            else:
+                # Dejamos que recule 0.8 segundos adicionales. Así el eje delantero sale por completo del pasillo estrecho
+                if ahora - self.tiempo_deteccion_salida >= 0.8:
+                    self._cambiar_estado(f'girar_{self.lado_salida_calculado}', 'salida trasera ejecutada con seguridad')
+                    self.tiempo_inicio_giro = ahora
+                    self.giro_comprometido  = True
+                    self.tiempo_deteccion_salida = 0.0
 
         elif self.estado in ('girar_izq', 'girar_der'):
             if self.giro_comprometido:
@@ -285,10 +328,8 @@ class MazeSolver(Node):
                 twist.linear.x = -VEL_RETROCESO
             else:
                 twist.linear.x = 0.0
-            # NUEVO: Bloqueamos el giro angular a 0.0 de forma estricta.
-            # Al no balancear las ruedas de lado a lado con retardos, el robot clava una línea recta perfecta.
             twist.angular.z = 0.0  
-            evento = f'retrocediendo_recto_puro B={self.d_back:.2f}'
+            evento = f'retrocediendo_seguro B={self.d_back:.2f}'
             
         elif self.estado == 'escape':
             twist.linear.x  = -0.05
@@ -298,23 +339,29 @@ class MazeSolver(Node):
         elif self.estado == 'girar_izq':
             twist.linear.x  = VEL_AVANCE_GIRO if d_f > 0.22 else 0.0
             twist.angular.z = VEL_GIRO
-            evento = f'girar_izq arco={twist.linear.x>0} t={tiempo_girando:.1f}s'
+            evento = f'girar_izq t={tiempo_girando:.1f}s'
             
         elif self.estado == 'girar_der':
             twist.linear.x  = VEL_AVANCE_GIRO if d_f > 0.22 else 0.0
             twist.angular.z = -VEL_GIRO
-            evento = f'girar_der arco={twist.linear.x>0} t={tiempo_girando:.1f}s'
+            evento = f'girar_der t={tiempo_girando:.1f}s'
             
-        else:  # avanzar
+        else:  # avanzar (Seguimiento de pared derecha)
             vel = self.velocidad_frenada(d_f, VEL_LINEAR_NORMAL)
             twist.linear.x = vel
             if d_r > 1.2:
-                twist.angular.z = -0.20
-                evento = f'buscando_pared vel={vel:.3f}'
+                # INTEGRACIÓN ANTIBUCLE EN RUTA ABIERTA: 
+                # Si el robot detecta que la pared derecha se abre, comprueba si meterse por ahí lleva al callejón negro.
+                if self._ruta_conduce_a_callejon(-math.pi/2):
+                    twist.angular.z = 0.0  # Lo obligamos a ignorar la abertura y seguir recto
+                    evento = 'ANTIBUCLE: Ignorando pasillo negro a la derecha'
+                else:
+                    twist.angular.z = -0.20
+                    evento = f'buscando_pared vel={vel:.3f}'
             else:
                 error = DIST_PARED_DERECHA - d_r
                 twist.angular.z = max(min(KP * error, 0.40), -0.40)
-                evento = f'siguiendo_pared_der err={error:.3f} vel={vel:.3f}'
+                evento = f'siguiendo_pared_der err={error:.3f}'
             if vel < VEL_LINEAR_NORMAL:
                 evento += ' FRENANDO'
 
