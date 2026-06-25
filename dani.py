@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
 """
-Laberint Solver — Versión Corregida y Optimizada
+Laberint Solver — Versión Corregida
 - Pasillos: locomoción ORIGINAL (choose_best_angle + pánico diagonal)
-- Giros: parar a 17cm de pared frontal, girar 55-68°
-- Detección: jerarquía corregida en modo retorno (Anti-saltos de pasillo)
+- Giros: parar a 17cm de pared frontal, girar 68°
+- Detección: mejorada (barrido lateral, cooldown, nodos con posición)
 """
 import math
 from datetime import datetime
@@ -38,7 +38,7 @@ class LaberintSolver(Node):
         with open(self.log_filename, 'w') as f:
             f.write("=== LOG ===\n")
 
-        # ═══ Velocidades ORIGINALES ═══
+        # ═══ Velocidades ORIGINALES (probadas en pasillos de 30cm) ═══
         self.LINEAR_SPEED = 0.02
         self.SLOW_SPEED = 0.01
         self.MIN_SPEED = 0.0
@@ -74,7 +74,7 @@ class LaberintSolver(Node):
         self.current_node = None
         self.returning_to_parent = False
         self.path_letters = []
-        self.INTERSECT_OPEN_THRESHOLD = 0.35  # Ajustado a 0.35 para máxima sensibilidad en pasillos de 30cm
+        self.INTERSECT_OPEN_THRESHOLD = 0.40
 
         # Máquina de estados
         self.mode = "EXPLORING"
@@ -92,7 +92,7 @@ class LaberintSolver(Node):
         self.max_ang_step = 0.12
         self.last_best_angle = 0.0
 
-        # Variables de atasco por Odometría
+        # Variables restauradas del detector de atasco por Odometría
         self.stuck_ref_x = 0.0
         self.stuck_ref_y = 0.0
         self.stuck_timer_start = self.get_clock().now()
@@ -106,8 +106,9 @@ class LaberintSolver(Node):
         self.create_subscription(Odometry, '/odom', self.odom_cb, qos)
         self.create_subscription(Bool, '/meta', self.meta_cb, 10)
         self.create_timer(0.1, self.control_loop)
-        self.log_event("ROBOT INICIADO. Jerarquía de retorno reparada.")
+        self.log_event("ROBOT INICIADO. Giro 68 grados + locomoción original.")
 
+    # ═══ UTILIDADES ═══
     def log_event(self, event, extra=""):
         if not self.scan_data: return
         F,FL,L = self.savg(0),self.savg(45),self.savg(90)
@@ -120,6 +121,7 @@ class LaberintSolver(Node):
             with open(self.log_filename,'a') as f: f.write(line+"\n")
         except: pass
 
+    # CAMBIO 4: scan_data clamped to 2.0 instead of 3.0
     def scan_cb(self, msg):
         if not msg.ranges: return
         self.scan_data = [float('inf') if (r is None or math.isnan(r) or math.isinf(r) or r<=0 or r<self.CHASSIS_FILTER) else min(r,2.0) for r in msg.ranges]
@@ -132,11 +134,11 @@ class LaberintSolver(Node):
 
     def meta_cb(self, msg): self.meta_reached = bool(msg.data)
 
+    # CAMBIO 4: svals clamped to 2.0 instead of 2.5
     def svals(self, ca, w=10):
         if not self.scan_data: return []
         n=len(self.scan_data); ca=int(ca)%n; h=w//2
         return [min(self.scan_data[(ca+o)%n],2.0) for o in range(-h,h+1) if self.scan_data[(ca+o)%n]>0.01 and not math.isinf(self.scan_data[(ca+o)%n])]
-    
     def savg(self, ca, w=10):
         v=self.svals(ca,w); return sum(v)/len(v) if v else 2.0
     def smin(self, ca, w=10):
@@ -150,17 +152,16 @@ class LaberintSolver(Node):
     def stop(self): self.cmd(0,0)
     def clamp(self, v, lo, hi): return max(lo,min(hi,v))
     def cell(self, x, y): return (round(x/self.grid_res),round(y/self.grid_res))
-    
     def smooth_ang(self, t):
         self.last_angular=self.clamp(self.last_angular+self.clamp(t-self.last_angular,-self.max_ang_step,self.max_ang_step),-self.ANGULAR_SPEED,self.ANGULAR_SPEED)
         return self.last_angular
-        
     def activate_cooldown(self):
         self.detection_cooldown = True
         self.cooldown_ticks = 30
         self.cooldown_x = self.pos_x
         self.cooldown_y = self.pos_y
 
+    # ═══ DETECCIÓN MEJORADA ═══
     def get_open_directions(self):
         dirs = []
         for a in [0, 180]:
@@ -179,6 +180,7 @@ class LaberintSolver(Node):
                 dirs.append(normalize_angle(self.yaw + turn))
         return dirs
 
+    # ═══ GIRO: rotación pura, frena al acercarse ═══
     def execute_safe_turn(self, target_yaw, angular_speed):
         diff = angle_diff(target_yaw, self.yaw)
         if abs(diff) < 0.05:
@@ -188,10 +190,10 @@ class LaberintSolver(Node):
         self.cmd(0, speed if diff > 0 else -speed)
         return False
 
+    # ═══ GRAFO TOPOLÓGICO ═══
     def log_turn_letter(self, ta):
         d=math.degrees(angle_diff(ta,self.yaw))
         self.path_letters.append('L' if d>45 else 'R' if d<-45 else 'S')
-        
     def simplify_path(self):
         changed=True
         while changed and len(self.path_letters)>=3:
@@ -213,6 +215,7 @@ class LaberintSolver(Node):
                       'came_from':came_from,'going_to':None,'x':self.pos_x,'y':self.pos_y}
                 self.topological_graph.append(node); self.current_node=node
         else:
+            # ── DEDUPLICACIÓN: ¿Ya existe un nodo en esta posición? ──
             NODE_MERGE_DIST = 0.15
             existing_node = None
             for n in self.topological_graph:
@@ -237,6 +240,7 @@ class LaberintSolver(Node):
             self.returning_to_parent = False
             self.path_letters = []
             
+            # Elegimos el camino físico menos visitado para salir de este cruce
             best_dir, best_v = paths[0], float('inf')
             for d in paths:
                 v = self.visited_cells.get(self.cell(self.pos_x+0.35*math.cos(d), self.pos_y+0.35*math.sin(d)), 0)
@@ -247,6 +251,7 @@ class LaberintSolver(Node):
             self.mode = "EXECUTING_TURN"
             return
 
+        # ── CAMBIO 1: Validar que las direcciones guardadas siguen abiertas ──
         valid = []
         for d in node['unexplored']:
             if abs(angle_diff(d, came_from)) < 0.5:
@@ -266,6 +271,7 @@ class LaberintSolver(Node):
             self.returning_to_parent = False
             self.path_letters = []
             
+            # Salimos por el camino menos explorado
             best_dir, best_v = paths[0], float('inf')
             for d in paths:
                 v = self.visited_cells.get(self.cell(self.pos_x+0.35*math.cos(d), self.pos_y+0.35*math.sin(d)), 0)
@@ -311,6 +317,9 @@ class LaberintSolver(Node):
             if s>bs:bs,ba=s,a
         self.last_best_angle=ba; return ba,bs
 
+    # ═══════════════════════════════════════════
+    # BUCLE PRINCIPAL
+    # ═══════════════════════════════════════════
     def control_loop(self):
         if not self.scan_data or self.finished: return
         if self.meta_reached:
@@ -331,6 +340,7 @@ class LaberintSolver(Node):
                 self.last_movement_time = self.get_clock().now()
                 return
             
+            # CAMBIO 5: Comprobar si hay pared detrás antes de retroceder
             back = self.savg(180, 20)
             if back < 0.14 or back >= 2:
                 self.stop()
@@ -346,6 +356,7 @@ class LaberintSolver(Node):
         # Mapeo de seguridad para detectar si estamos bloqueados
         if self.mode in ["EXECUTING_TURN", "TURN_180"] or fmin < self.FRONT_BRAKE:
             tiempo_atrapado = (self.get_clock().now() - self.last_movement_time).nanoseconds / 1e9
+            
             limite_tiempo = 50.0 if self.mode == "TURN_180" else 25.0
             
             if tiempo_atrapado > limite_tiempo: 
@@ -359,18 +370,20 @@ class LaberintSolver(Node):
                     self.log_event("Atasco en 180°. Memoria salvada: Volviendo al padre.")
                 
                 self.escape_dir_linear = -1.0 
+                
                 if lmin < rmin:
                     self.escape_dir_angular = -0.08 
                 else:
                     self.escape_dir_angular = 0.08
                     
                 self.log_event(f"¡ATASCADO! ({tiempo_atrapado:.1f}s). Escape: MARCHA ATRÁS EN CURVA 4cm.")
+                    
                 self.mode = "ESCAPING"
                 return
         else:
             self.last_movement_time = self.get_clock().now()
 
-        # ── 0.5 DETECCIÓN DE ATASCO POR ODOMETRÍA ──
+        # ── 0.5 DETECCIÓN DE ATASCO POR ODOMETRÍA (El método de los 5cm) ──
         if self.mode != "ESCAPING":
             dist_recorrida = dist2d(self.pos_x, self.pos_y, self.stuck_ref_x, self.stuck_ref_y)
             tiempo_en_zona = (self.get_clock().now() - self.stuck_timer_start).nanoseconds / 1e9
@@ -393,12 +406,14 @@ class LaberintSolver(Node):
                         self.log_event("Atasco en 180°. Memoria salvada: Volviendo al padre.")
                     
                     self.escape_dir_linear = -1.0 
+                    
                     if lmin < rmin:
                         self.escape_dir_angular = -0.08 
                     else:
                         self.escape_dir_angular = 0.08
                         
                     self.log_event(f"¡ATASCADO FÍSICAMENTE! ({tiempo_en_zona:.1f}s atrapado en 5cm). Escape.")
+                    
                     self.mode = "ESCAPING"
                     
                     self.stuck_ref_x = self.pos_x
@@ -416,6 +431,7 @@ class LaberintSolver(Node):
                 err = 0.0
                 
             ac = self.clamp(err * 3.5, -0.40, 0.40)
+            
             grado_cero = self.smin(0, 10)
             adv = dist2d(self.pos_x, self.pos_y, self.verify_start_x, self.verify_start_y)
 
@@ -427,22 +443,32 @@ class LaberintSolver(Node):
             self.log_event(f"Posición lista (F:{grado_cero:.2f}m). Evaluando cruce...")
             return
 
-        # ── 2. ANALYZING_NODE (Jerarquía Corregida) ──
+        # ── 2. ANALYZING_NODE ──
         if self.mode == "ANALYZING_NODE":
+            
             frente_abierto = self.savg(0, 15) > 0.29
-            izq_abierto = self.savg(90, 15) > 0.35 or self.savg(45, 30) > 0.45
-            der_abierto = self.savg(270, 15) > 0.35 or self.savg(315, 30) > 0.45
+
+            izq_abierto = self.savg(90, 15) > 0.39 or self.savg(45, 30) > 0.49
+            der_abierto = self.savg(270, 15) > 0.39 or self.savg(315, 30) > 0.49
 
             caminos_detectados_relativos = []
             if frente_abierto: caminos_detectados_relativos.append(0.0)
-            if izq_abierto: caminos_detectados_relativos.append(self.TURN_ANGLE_RAD)
-            if der_abierto: caminos_detectados_relativos.append(-self.TURN_ANGLE_RAD)
+            if izq_abierto: caminos_detectados_relativos.append(math.radians(55))
+            if der_abierto: caminos_detectados_relativos.append(math.radians(-55))
 
             fp = [normalize_angle(self.yaw + ang) for ang in caminos_detectados_relativos]
             cf = normalize_angle(self.yaw + math.pi)
 
-            # --- CORRECCIÓN DE JERARQUÍA ABSOLUTA PARA RETORNO ---
+            # --- DETECCIÓN DE NODO CAMUFLADO ---
+            es_nodo_padre = False
+            if self.returning_to_parent and self.current_node is not None:
+                dist_al_nodo = dist2d(self.pos_x, self.pos_y, self.current_node['x'], self.current_node['y'])
+                if dist_al_nodo < 0.45:
+                    es_nodo_padre = True
+
+            # --- DECISIÓN TOPOLÓGICA Y BACKTRACKING ---
             if len(fp) == 0:
+                # ── SÚPER SALVAVIDAS ANTI-FALSOS CALLEJONES ──
                 val_L = max(self.savg(90, 20), self.savg(45, 20))
                 val_R = max(self.savg(270, 20), self.savg(315, 20))
                 
@@ -450,81 +476,27 @@ class LaberintSolver(Node):
                     self.log_event(f"Curva rescatada por asimetría IZQ (L:{val_L:.2f}). Girando.")
                     self.target_yaw = normalize_angle(self.yaw + self.TURN_ANGLE_RAD)
                     self.mode = "EXECUTING_TURN"
+                    
                 elif val_R > 0.30 and val_R > (val_L + 0.10):
                     self.log_event(f"Curva rescatada por asimetría DER (R:{val_R:.2f}). Girando.")
                     self.target_yaw = normalize_angle(self.yaw - self.TURN_ANGLE_RAD)
                     self.mode = "EXECUTING_TURN"
+                    
                 elif val_L > 0.30 and val_R > 0.45:
-                    self.log_event(f"Cruce en 'T' ciego rescatado. Forzando giro.")
-                    self.target_yaw = normalize_angle(self.yaw + self.TURN_ANGLE_RAD) if val_L > val_R else normalize_angle(self.yaw - self.TURN_ANGLE_RAD)
+                    self.log_event(f"Cruce en 'T' ciego rescatado (L:{val_L:.2f}, R:{val_R:.2f}). Forzando giro.")
+                    if val_L > val_R:
+                        self.target_yaw = normalize_angle(self.yaw + self.TURN_ANGLE_RAD)
+                    else:
+                        self.target_yaw = normalize_angle(self.yaw - self.TURN_ANGLE_RAD)
                     self.mode = "EXECUTING_TURN"
+                    
                 else:
-                    self.log_event(f"Callejón sin salida confirmado. 180°")
+                    self.log_event(f"Callejón sin salida confirmado. 180° (Max L:{val_L:.2f}, R:{val_R:.2f})")
                     self.target_yaw = normalize_angle(self.yaw + math.pi)
                     self.activate_cooldown()
                     self.mode = "TURN_180"
-                return
 
-            # Si hay salidas viables y estamos en modo RETORNO, evaluamos topología ANTES que las curvas simples
-            if self.returning_to_parent:
-                es_el_padre_real = False
-                if self.current_node:
-                    dist_al_padre = dist2d(self.pos_x, self.pos_y, self.current_node['x'], self.current_node['y'])
-                    if dist_al_padre < 0.25:
-                        es_el_padre_real = True
-
-                if self.current_node is None or es_el_padre_real:
-                    self.log_event("Regreso a Nodo Padre Completado")
-                    self.returning_to_parent = False
-                    self.path_letters.append('B')
-                    self.simplify_path()
-                    
-                    if self.current_node and len(self.current_node['unexplored']) > 0:
-                        best_match_diff = float('inf')
-                        best_dir = cf
-                        best_unexp_idx = -1
-                        
-                        for current_dir in fp:
-                            for i, unexp_dir in enumerate(self.current_node['unexplored']):
-                                diff = abs(angle_diff(current_dir, unexp_dir))
-                                if diff < best_match_diff:
-                                    best_match_diff = diff
-                                    best_dir = current_dir
-                                    best_unexp_idx = i
-                                    
-                        if best_match_diff < 0.8: 
-                            self.current_node['unexplored'].pop(best_unexp_idx)
-                            self.log_event("Memoria topológica: Ruta inexplorada recuperada con éxito.")
-                        else:
-                            self.log_event("Aviso: Desfase de orientación. Escogiendo alternativa forzada.")
-                            best_dir = fp[-1] if len(fp) > 1 else fp[0]
-                            
-                        self.target_yaw = best_dir
-                        self.mode = "EXECUTING_TURN"
-                    else:
-                        self.log_event("Nodo Padre Agotado. Reiniciando exploración.")
-                        self.topological_graph = []
-                        self.current_node = None
-                        self.returning_to_parent = False
-                        self.path_letters = []
-                        
-                        best_dir, best_v = fp[0], float('inf')
-                        for d in fp:
-                            v = self.visited_cells.get(self.cell(self.pos_x+0.35*math.cos(d), self.pos_y+0.35*math.sin(d)), 0)
-                            if v < best_v: best_v, best_dir = v, d
-                                
-                        self.target_yaw = best_dir
-                        self.mode = "EXECUTING_TURN"
-                else:
-                    # CASO B: Cruce intermedio detectado a la vuelta. ¡DETENEMOS EL RETORNO!
-                    self.log_event(f"Bifurcación intermedia detectada al volver (Dist al padre: {dist_al_padre:.2f}m). Evaluando como nuevo nodo.")
-                    self.returning_to_parent = False
-                    cf_hacia_padre = self.yaw
-                    self.process_topological_node(fp, cf_hacia_padre)
-                return
-
-            # Si NO estamos volviendo, exploración normal directa
-            if len(fp) == 1:
+            elif len(fp) == 1 and not es_nodo_padre:
                 if fp[0] == 0.0:
                     self.log_event("Falsa alarma (Solo frente). Aplicando venda y cruzando.")
                     self.mode = "EXPLORING"
@@ -534,9 +506,122 @@ class LaberintSolver(Node):
                     self.log_event("Curva obligatoria confirmada. Girando.")
                     self.target_yaw = fp[0]
                     self.mode = "EXECUTING_TURN"
+                    
             else:
-                self.log_event(f"Cruce nuevo ({len(fp)} vías). F:{frente_abierto} L:{izq_abierto} R:{der_abierto}")
-                self.process_topological_node(fp, cf)
+                if es_nodo_padre and len(fp) == 1:
+                    self.log_event("Nodo padre alcanzado (camuflado como curva).")
+                else:
+                    self.log_event(f"Cruce ({len(fp)} vías). F:{frente_abierto} L:{izq_abierto} R:{der_abierto}")
+
+                # CAMBIO 3: Graph Exhausted condition
+                if self.returning_to_parent and self.current_node is None:
+                    if len(self.topological_graph) > 0:
+                        self.log_event("GRAFO AGOTADO. Reiniciando exploración desde cero.")
+                        self.topological_graph = []
+                        self.current_node = None
+                        self.returning_to_parent = False
+                        self.path_letters = []
+                        self.mode = "EXPLORING"
+                        self.activate_cooldown()
+                        return
+                    else:
+                        self.log_event("Primer cruce tras cul-de-sac inicial. Creando mapa.")
+                        self.returning_to_parent = False
+
+                if self.returning_to_parent:
+                    
+                    # CAMBIO 2: GPS Verification — comprobar distancia real al padre
+                    es_el_padre_real = False
+                    if self.current_node:
+                        dist_al_padre = dist2d(self.pos_x, self.pos_y, self.current_node['x'], self.current_node['y'])
+                        if dist_al_padre < 0.25:
+                            es_el_padre_real = True
+                            
+                    # CASO A: Es el padre real (o el primer nodo de todos)
+                    if self.current_node is None or es_el_padre_real:
+                        self.log_event("Regreso a Nodo Padre Completado")
+                        self.returning_to_parent = False
+                        self.path_letters.append('B')
+                        self.simplify_path()
+                        
+                        if self.current_node and len(self.current_node['unexplored']) > 0:
+                            best_match_diff = float('inf')
+                            best_dir = cf
+                            best_unexp_idx = -1
+                            
+                            for current_dir in fp:
+                                for i, unexp_dir in enumerate(self.current_node['unexplored']):
+                                    diff = abs(angle_diff(current_dir, unexp_dir))
+                                    if diff < best_match_diff:
+                                        best_match_diff = diff
+                                        best_dir = current_dir
+                                        best_unexp_idx = i
+                                        
+                            if best_match_diff < 0.8: 
+                                self.current_node['unexplored'].pop(best_unexp_idx)
+                                self.log_event("Memoria topológica: Ruta inexplorada recuperada con éxito.")
+                            else:
+                                self.log_event("Aviso: Desfase de orientación. Escogiendo alternativa forzada.")
+                                best_dir = fp[-1] if len(fp) > 1 else fp[0]
+                                
+                            self.target_yaw = best_dir
+                            self.mode = "EXECUTING_TURN"
+                            self.log_event(f"Re-evaluación tras retorno: Eligiendo giro de {math.degrees(angle_diff(best_dir, self.yaw)):.0f}°")
+                        
+                        else:
+                            self.log_event("Nodo Padre Agotado. Reiniciando exploración como nuevo inicio.")
+                            self.topological_graph = []
+                            self.current_node = None
+                            self.returning_to_parent = False
+                            self.path_letters = []
+                            
+                            # Para evitar que se quede quieto, forzamos la salida por el camino menos visitado
+                            best_dir, best_v = fp[0], float('inf')
+                            for d in fp:
+                                v = self.visited_cells.get(self.cell(self.pos_x+0.35*math.cos(d), self.pos_y+0.35*math.sin(d)), 0)
+                                if v < best_v: 
+                                    best_v, best_dir = v, d
+                                    
+                            self.target_yaw = best_dir
+                            self.mode = "EXECUTING_TURN"
+
+                    # CASO B: Nuevo cruce descubierto a la vuelta (Falso Padre)
+                    else:
+                        self.log_event(f"Cruce intermedio detectado (Dist al padre: {dist_al_padre:.2f}m). Registrando como nuevo nodo.")
+                        
+                        # 1. Cancelamos el modo retorno temporalmente.
+                        # Ahora este nuevo cruce es nuestro foco principal.
+                        self.returning_to_parent = False
+                        
+                        # 2. Truco topológico: El robot venía de un cul-de-sac (atrás).
+                        # Su padre original está hacia adelante (self.yaw).
+                        # Le decimos que su "origen" (came_from) es hacia adelante. 
+                        # De esta forma, el algoritmo filtrará el frente para no ir por ahí ahora,
+                        # obligándole a explorar los laterales primero. Cuando agote los laterales,
+                        # el robot usará este 'came_from' para seguir recto hacia el padre original.
+                        cf_hacia_padre = self.yaw
+                        
+                        # 3. Procesamos este nodo como cualquier otro en el grafo
+                        self.process_topological_node(fp, cf_hacia_padre)
+                        
+                        # 4. Red de seguridad: Si por alguna razón la decisión topológica
+                        # fue seguir recto, evitamos que intente "girar 0 grados" y cruzamos fluidamente.
+                        if self.mode == "EXECUTING_TURN" and abs(normalize_angle(self.target_yaw - self.yaw)) < 0.10:
+                            self.log_event("Decisión de cruce: Seguir recto por el momento. Activando escudo.")
+                            self.mode = "EXPLORING"
+                            self.activate_cooldown() 
+                            self.cooldown_ticks = 50
+                
+                else:
+                    self.log_event(f"Cruce ({len(fp)} vías). F:{frente_abierto} L:{izq_abierto} R:{der_abierto}")
+                    self.process_topological_node(fp, cf)
+                    
+                    if self.mode == "EXECUTING_TURN" and abs(normalize_angle(self.target_yaw - self.yaw)) < 0.10:
+                        self.log_event("Decisión de cruce: Continuar recto (Giro 0°). Activando escudo de 5 segundos.")
+                        self.mode = "EXPLORING"
+                        self.activate_cooldown() 
+                        self.cooldown_ticks = 50
+                        return
 
         # ── 3. EXECUTING_TURN ──
         if self.mode == "EXECUTING_TURN":
@@ -560,8 +645,9 @@ class LaberintSolver(Node):
             return
 
         # ══════════════════════════════════════════
-        # 5. EXPLORING — WALL FOLLOWING
+        # 5. EXPLORING — WALL FOLLOWING (14-17cm de pared)
         # ══════════════════════════════════════════
+        
         if lmin < 0.30 and rmin < 0.30:
             self.in_intersection_zone = False
 
@@ -571,9 +657,10 @@ class LaberintSolver(Node):
 
         if abs(self.last_angular) > 0.15: has_lat = False
         
-        # ── INTERRUPTOR DE COOLDOWN POR RADIO DE DISTANCIA ──
+        # ── INTERRUPTOR DE COOLDOWN POR RADIO DE CENTÍMETROS ──
         if self.detection_cooldown:
             dist_desde_nodo = dist2d(self.pos_x, self.pos_y, self.cooldown_x, self.cooldown_y)
+            
             if dist_desde_nodo >= self.COOLDOWN_DISTANCE:
                 self.detection_cooldown = False
                 self.in_intersection_zone = False 
@@ -582,18 +669,22 @@ class LaberintSolver(Node):
                 has_lat = False
                 self.in_intersection_zone = True
                 
-                if flmin < 0.20 or lmin < 0.16:
+                if lmin < 0.20 and rmin < 0.20:
+                    pass  
+                elif flmin < 0.20 or lmin < 0.16:
                     deficit = max(0.20 - flmin, 0.16 - lmin)
+                    error = deficit * -4.0
                 elif frmin < 0.20 or rmin < 0.16:
                     deficit = max(0.20 - frmin, 0.16 - rmin)
+                    error = deficit * 4.0
 
-        # --- GATILLO 1 REPARADO: Se quita el freno de fmin > 0.60 para evitar puntos ciegos ---
-        if has_lat and not self.detection_cooldown and not self.in_intersection_zone:
+        # --- GATILLO 1: HUECO LATERAL DETECTADO ---
+        if has_lat and not self.detection_cooldown and not self.in_intersection_zone and fmin > 0.60:
             self.stop()
             self.mode = "ANALYZING_NODE" 
             self.verify_start_x, self.verify_start_y = self.pos_x, self.pos_y
             self.in_intersection_zone = True
-            self.log_event("Hueco lateral detectado en tránsito. Analizando...")
+            self.log_event("Hueco lateral (+). Freno en seco y evaluando...")
             return
 
         # --- GATILLO 2: FRENO EN CURVAS Y T ---
@@ -624,7 +715,7 @@ class LaberintSolver(Node):
             self.cmd(0, td * self.ANGULAR_SPEED * 0.6); return
 
         # ══════════════════════════════════════════
-        # WALL FOLLOWING ORIGINAL CONFIG
+        # WALL FOLLOWING: Control PD Robusto (Anti-huecos)
         # ══════════════════════════════════════════
         TARGET = 0.155        
         TARGET_DIAG = 0.220   
