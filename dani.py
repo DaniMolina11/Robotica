@@ -9,20 +9,19 @@ import math
 import time
 from collections import deque
 
-# --- PARÁMETROS OPTIMIZADOS PARA APURAR EL FONDO (PASILLOS 30-35 CM) ---
-DIST_GIRO_PASILLO      = 0.22   # Reducido para que se aproxime más al cruce antes de evaluar
-DIST_PARAR_GIRO        = 0.18   # AJUSTADO: El robot apura hasta 18cm del fondo para abrir los laterales
-DIST_FRENAR            = 0.42   # Ajustado proporcionalmente para una frenada suave
+# --- PARÁMETROS DE TU CÓDIGO ORIGINAL ---
+DIST_GIRO_PASILLO      = 0.22   
+DIST_PARAR_GIRO        = 0.18   # Apura hasta el fondo para liberar el morro
+DIST_FRENAR            = 0.42   
 DIST_PARED_DERECHA     = 0.25   
 DIST_PASILLO           = 0.45   
-DIST_ESQUINA_CERRADA   = 0.14   # Ajustado al nuevo límite frontal
+DIST_ESQUINA_CERRADA   = 0.14   
 DIST_SEGURIDAD_TRASERA = 0.16   
 
 VEL_LINEAR_PASILLO    = 0.06
 VEL_LINEAR_NORMAL     = 0.08
 VEL_RETROCESO         = 0.05
-VEL_GIRO              = 0.28   
-VEL_AVANCE_GIRO       = 0.06   
+VEL_GIRO              = 0.35   # Un pelo más rápido para giros más limpios
 KP                    = 1.2
 
 TIEMPO_GIRO_MINIMO    = 1.5
@@ -54,6 +53,9 @@ class MazeSolver(Node):
         self.d_diag_izq = 3.0
         self.d_diag_der = 3.0
 
+        # NUEVO: Lectura instantánea frontal sin retardos para clavar el ángulo de salida
+        self.d_front_raw = 3.0
+
         self.pos_x = 0.0
         self.pos_y = 0.0
         self.yaw   = 0.0  
@@ -66,7 +68,7 @@ class MazeSolver(Node):
         self.giro_comprometido       = False
         self.ticks_fuera_pasillo     = 0
 
-        # Sistema de memoria de coordenadas para el descarte de caminos
+        # Memoria de coordenadas anti-bucles
         self.path_history           = []  
         self.punto_inicio_retroceso = None 
         self.callejones_visitados   = []  
@@ -81,7 +83,7 @@ class MazeSolver(Node):
         self.vel_ang_pub = 0.0
 
         self.log_file = open(LOG_FILE, 'w')
-        self._log_raw('=== INICIO SESION MAZE SOLVER APURADO FRONTAL ===')
+        self._log_raw('=== INICIO SESION MAZE SOLVER ESTABILIZADO ===')
 
     def _log_raw(self, msg):
         ts = time.strftime('%H:%M:%S')
@@ -129,13 +131,18 @@ class MazeSolver(Node):
         r = msg.ranges
         if len(r) < 360:
             return
+            
+        # NUEVO: Captura instantánea en tiempo real (Haz cerrado de 4° de frente)
+        self.d_front_raw = min(self.sector_min(r, 358, 360), self.sector_min(r, 0, 2))
+
         self.buf_front.append(min(self.sector_min(r, 351, 360), self.sector_min(r, 0, 9)))
-        self.buf_right.append(   self.sector_min(r, 265, 295)) # Ajustado abanico lateral para no morder esquinas
-        self.buf_left.append(    self.sector_min(r,  65, 115)) # Ajustado a 90° puro +/- 25°
-        self.buf_back.append(    self.sector_min(r, 175, 185)) # Ajustado a 180° +/- 5° para clavar la trasera
+        self.buf_right.append(   self.sector_min(r, 265, 295)) 
+        self.buf_left.append(    self.sector_min(r,  65, 115)) 
+        self.buf_back.append(    self.sector_min(r, 175, 185)) 
         self.buf_diag_izq.append(self.sector_min(r,  35,  55))
         self.buf_diag_der.append(self.sector_min(r, 305, 325))
         self.lecturas_acumuladas += 1
+        
         self.d_front    = self.promedio(self.buf_front)
         self.d_right    = self.promedio(self.buf_right)
         self.d_left     = self.promedio(self.buf_left)
@@ -204,7 +211,6 @@ class MazeSolver(Node):
         if self.estado == 'esperando':
             self._cambiar_estado('avanzar', 'lecturas listas')
 
-        # Registro continuo de huellas para el desandado posterior
         if self.estado in ('avanzar', 'pasillo'):
             if not self.path_history:
                 self.path_history.append((self.pos_x, self.pos_y))
@@ -223,8 +229,6 @@ class MazeSolver(Node):
 
         # --- REGLA PROTEGIDA EN LÍNEA RECTA ---
         if self.estado in ('avanzar', 'pasillo'):
-            # CORREGIDO: Bajamos el umbral frontal a 0.18 m. Obliga al robot a apurar al fondo
-            # para que los laterales limpien la esquina y vean si el camino continúa
             callejon_muerto = (d_f <= 0.18 and d_l < 0.35 and d_r < 0.35)
             if callejon_muerto:
                 self._cambiar_estado('retroceder', 'callejon real detectado en el fondo')
@@ -268,8 +272,12 @@ class MazeSolver(Node):
                 if tiempo_generico >= TIEMPO_GIRO_MINIMO:
                     self.giro_comprometido = False
             else:
-                if d_f >= DIST_PARAR_GIRO + 0.08:
+                # CORREGIDO: Usamos el frente INSTANTÁNEO y real (d_front_raw) para clavar la salida
+                # En cuanto ve el hueco (> 0.45m), detiene el pivote al milisegundo exacto.
+                if self.d_front_raw >= 0.45:
                     self._cambiar_estado('avanzar', 'frente libre tras giro')
+                    self.reset_filtros() # CORREGIDO: Limpiamos buffers viejos para empezar a seguir la pared sin vicios
+                    return
 
         elif self.estado == 'retroceder':
             if self.path_history:
@@ -286,17 +294,16 @@ class MazeSolver(Node):
                     ix, iy = self.punto_inicio_retroceso
                     dist_desde_inicio = math.sqrt((self.pos_x - ix)**2 + (self.pos_y - iy)**2)
 
-                # REPARADO: Evaluamos salir del reverso si nos alejamos >0.38m O si el escudo trasero 
-                # de seguridad detecta que nos vamos a estampar contra una pared de atrás.
                 if dist_desde_inicio > 0.38 or self.d_back <= DIST_SEGURIDAD_TRASERA:
                     izq_despejada = (d_l > 0.40) and not self._camino_conduce_a_callejon('izq')
                     der_despejada = (d_r > 0.40) and not self._camino_conduce_a_callejon('der')
                     
                     if izq_despejada or der_despejada:
                         lado = 'izq' if d_l > d_r else 'der'
-                        self._cambiar_estado(f'girar_{lado}', f'Salida trasera despejada hacia {lado}')
+                        self._cambiar_estado(f'girar_{lado}', f'Saliendo del callejón hacia {lado}')
                         self.tiempo_inicio_giro = ahora
                         self.giro_comprometido  = True
+                        self.reset_filtros() # CORREGIDO: Limpiamos los buffers antes de empezar a girar
                         return
 
         # --- APLICACIÓN DE VELOCIDADES ---
@@ -316,11 +323,10 @@ class MazeSolver(Node):
                 error_angle = target_angle - (self.yaw + math.pi)
                 error_angle = math.atan2(math.sin(error_angle), math.cos(error_angle))
                 
-                # REPARADO: Escudo activo de proximidad trasera para no estamparse contra los muros
                 if self.d_back > DIST_SEGURIDAD_TRASERA:
                     twist.linear.x = -VEL_RETROCESO
                 else:
-                    twist.linear.x = 0.0  # Freno total instantáneo
+                    twist.linear.x = 0.0  
                     evento = 'ESCUDO ACTIVADO: Freno por proximidad trasera'
                 
                 twist.angular.z = 1.2 * error_angle 
@@ -334,12 +340,12 @@ class MazeSolver(Node):
                 evento = 'retro_lineal_fallback'
             
         elif self.estado == 'girar_izq':
-            twist.linear.x  = 0.0  # Pivote puro in-situ para asegurar el giro limpio
+            twist.linear.x  = 0.0  # Pivote puro in-situ
             twist.angular.z = VEL_GIRO
             evento = 'pivote_izq'
             
         elif self.estado == 'girar_der':
-            twist.linear.x  = 0.0  # Pivote puro in-situ para asegurar el giro limpio
+            twist.linear.x  = 0.0  # Pivote puro in-situ
             twist.angular.z = -VEL_GIRO
             evento = 'pivote_der'
             
