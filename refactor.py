@@ -128,7 +128,7 @@ class LaberintSolver(Node):
     def cell(self, x, y): return (round(x/self.grid_res),round(y/self.grid_res))
     
     def smooth_ang(self, t):
-        self.last_angular=self.clamp(self.last_angular+self.clamp(t-self.last_angular,-self.max_ang_step,self.max_ang_step),-self.ANGULAR_SPEED,self.ANGULAR_SPEED)
+        self.last_angular = self.clamp(self.last_angular + self.clamp(t - self.last_angular, -self.max_ang_step, self.max_ang_step), -0.45, 0.45)
         return self.last_angular
         
     def activate_cooldown(self):
@@ -136,24 +136,6 @@ class LaberintSolver(Node):
         self.cooldown_ticks = 30
         self.cooldown_x = self.pos_x
         self.cooldown_y = self.pos_y
-
-    def get_open_directions(self):
-        dirs = []
-        for a in [0, 180]:
-            v = self.svals(a, 24)
-            if v and sum(v)/len(v) >= self.INTERSECT_OPEN_THRESHOLD:
-                dirs.append(normalize_angle(self.yaw + math.radians(a)))
-        for sc in [90, 270]:
-            bd = 0.0
-            for off in [-10, 0, 10]:
-                v = self.svals(sc+off, 14)
-                if v:
-                    d = sum(v)/len(v)
-                    if d > bd: bd = d
-            if bd >= self.INTERSECT_OPEN_THRESHOLD:
-                turn = self.TURN_ANGLE_RAD if sc == 90 else -self.TURN_ANGLE_RAD
-                dirs.append(normalize_angle(self.yaw + turn))
-        return dirs
 
     def execute_safe_turn(self, target_yaw, angular_speed):
         diff = angle_diff(target_yaw, self.yaw)
@@ -164,10 +146,6 @@ class LaberintSolver(Node):
         self.cmd(0, speed if diff > 0 else -speed)
         return False
 
-    def log_turn_letter(self, ta):
-        d=math.degrees(angle_diff(ta,self.yaw))
-        self.path_letters.append('L' if d>45 else 'R' if d<-45 else 'S')
-        
     def simplify_path(self):
         changed=True
         while changed and len(self.path_letters)>=3:
@@ -257,28 +235,9 @@ class LaberintSolver(Node):
                 break
         
         node['going_to']=best_dir
-        self.log_turn_letter(best_dir); self.simplify_path()
+        self.simplify_path()
         self.target_yaw=best_dir
         self.mode="EXECUTING_TURN"
-
-    def novelty_score(self, rel_deg):
-        ty=self.yaw+math.radians(rel_deg); s=0.0
-        for d in (0.3,0.6,0.9):
-            v=self.visited_cells.get(self.cell(self.pos_x+d*math.cos(ty),self.pos_y+d*math.sin(ty)),0)
-            s+=1.6 if v==0 else 0.6 if v<3 else 0.0 if v<7 else -1.2
-        return s
-
-    def choose_best_angle(self):
-        bs,ba=-1e9,0
-        for a in range(-95,96,5):
-            ca=a%360; avg=self.savg(ca,14); mn=self.smin(ca,10); mw=self.smin(ca,24)
-            s=avg*1.8+mn*0.8+mw*1.8-abs(a)*0.015+self.novelty_score(a)
-            if mw<0.20:s-=6.0
-            elif mw<0.26:s-=3.0
-            if mn<0.16:s-=2.5
-            s-=abs(a-self.last_best_angle)*0.005
-            if s>bs:bs,ba=s,a
-        self.last_best_angle=ba; return ba,bs
 
     def control_loop(self):
         if not self.scan_data or self.finished: return
@@ -426,7 +385,6 @@ class LaberintSolver(Node):
 
                 if self.current_node is None or es_el_padre_real:
                     self.returning_to_parent = False
-                    self.path_letters.append('B')
                     self.simplify_path()
                     
                     if self.current_node and len(self.current_node['unexplored']) > 0:
@@ -513,15 +471,9 @@ class LaberintSolver(Node):
             else: 
                 has_lat = False
                 self.in_intersection_zone = True
-                
-                if flmin < 0.20 or lmin < 0.16:
-                    deficit = max(0.20 - flmin, 0.16 - lmin)
-                elif frmin < 0.20 or rmin < 0.16:
-                    deficit = max(0.20 - frmin, 0.16 - rmin)
 
         if has_lat and not self.detection_cooldown and not self.in_intersection_zone:
-            self.stop()
-            self.mode = "ANALYZING_NODE" 
+            self.mode = "APPROACHING_INTERSECTION" 
             self.verify_start_x, self.verify_start_y = self.pos_x, self.pos_y
             self.in_intersection_zone = True
             return
@@ -568,11 +520,11 @@ class LaberintSolver(Node):
             error = (TARGET - rmin) * 3.0 + (TARGET_DIAG - c_frmin) * 1.5
 
         if lmin < 0.115 or flmin < 0.13:
-            error = -0.6  
+            error = -0.5  
         elif rmin < 0.115 or frmin < 0.13:
-            error = 0.6   
+            error = 0.5   
 
-        angular = self.clamp(error, -0.45, 0.45)
+        angular = self.smooth_ang(self.clamp(error, -0.45, 0.45))
         
         linear = self.LINEAR_SPEED
         if fmin < self.FRONT_SLOW or abs(angular) > 0.20:
