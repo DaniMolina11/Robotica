@@ -1,10 +1,3 @@
-#!/usr/bin/env python3
-"""
-Laberint Solver — Versión Corregida y Optimizada
-- Pasillos: locomoción ORIGINAL (choose_best_angle + pánico diagonal)
-- Giros: parar a 17cm de pared frontal, girar 55-68°
-- Detección: jerarquía corregida en modo retorno (Anti-saltos de pasillo)
-"""
 import math
 from datetime import datetime
 from collections import defaultdict
@@ -38,7 +31,6 @@ class LaberintSolver(Node):
         with open(self.log_filename, 'w') as f:
             f.write("=== LOG ===\n")
 
-        # ═══ Velocidades ORIGINALES ═══
         self.LINEAR_SPEED = 0.02
         self.SLOW_SPEED = 0.01
         self.MIN_SPEED = 0.0
@@ -49,19 +41,16 @@ class LaberintSolver(Node):
         self.DIAG_PANIC = 0.14
         self.CHASSIS_FILTER = 0.05
 
-        # ═══ Parámetros de giro ═══
         self.WALL_STOP = 0.20
         self.TURN_ANGLE = 55
         self.TURN_ANGLE_RAD = math.radians(self.TURN_ANGLE)
 
-        # Variables para la maniobra de escape en atascos
         self.last_movement_time = self.get_clock().now()
         self.escape_start_x = 0.0
         self.escape_start_y = 0.0
         self.escape_dir_linear = -1.0
         self.escape_dir_angular = 0.0
 
-        # Estado
         self.scan_data = None
         self.finished = False
         self.meta_reached = False
@@ -69,19 +58,16 @@ class LaberintSolver(Node):
         self.grid_res = 0.30
         self.visited_cells = defaultdict(int)
 
-        # Grafo topológico
         self.topological_graph = []
         self.current_node = None
         self.returning_to_parent = False
         self.path_letters = []
-        self.INTERSECT_OPEN_THRESHOLD = 0.35  # Ajustado a 0.35 para máxima sensibilidad en pasillos de 30cm
+        self.INTERSECT_OPEN_THRESHOLD = 0.35  
 
-        # Máquina de estados
         self.mode = "EXPLORING"
         self.target_yaw = 0.0
         self.backtrack_after_turn = False
 
-        # Cooldown y memoria
         self.detection_cooldown = False
         self.cooldown_x = self.cooldown_y = 0.0
         self.COOLDOWN_DISTANCE = 0.10
@@ -92,13 +78,11 @@ class LaberintSolver(Node):
         self.max_ang_step = 0.12
         self.last_best_angle = 0.0
 
-        # Variables de atasco por Odometría
         self.stuck_ref_x = 0.0
         self.stuck_ref_y = 0.0
         self.stuck_timer_start = self.get_clock().now()
         self.STUCK_RADIUS = 0.05
 
-        # ROS
         self.cmd_pub = self.create_publisher(Twist, '/cmd_vel', 10)
         qos = QoSProfile(reliability=ReliabilityPolicy.BEST_EFFORT,
                          history=HistoryPolicy.KEEP_LAST, depth=10)
@@ -320,7 +304,6 @@ class LaberintSolver(Node):
         fmin, favg = self.front_metrics()
         lmin, rmin, flmin, frmin = self.side_metrics()
 
-        # ── 0. ESTADO DE ESCAPE (ANTI-BLOQUEOS) ──
         if self.mode == "ESCAPING":
             adv_escape = dist2d(self.pos_x, self.pos_y, self.escape_start_x, self.escape_start_y)
             if adv_escape >= 0.08:
@@ -343,7 +326,6 @@ class LaberintSolver(Node):
             self.cmd(self.SLOW_SPEED * self.escape_dir_linear, self.escape_dir_angular)
             return
 
-        # Mapeo de seguridad para detectar si estamos bloqueados
         if self.mode in ["EXECUTING_TURN", "TURN_180"] or fmin < self.FRONT_BRAKE:
             tiempo_atrapado = (self.get_clock().now() - self.last_movement_time).nanoseconds / 1e9
             limite_tiempo = 50.0 if self.mode == "TURN_180" else 25.0
@@ -370,7 +352,6 @@ class LaberintSolver(Node):
         else:
             self.last_movement_time = self.get_clock().now()
 
-        # ── 0.5 DETECCIÓN DE ATASCO POR ODOMETRÍA ──
         if self.mode != "ESCAPING":
             dist_recorrida = dist2d(self.pos_x, self.pos_y, self.stuck_ref_x, self.stuck_ref_y)
             tiempo_en_zona = (self.get_clock().now() - self.stuck_timer_start).nanoseconds / 1e9
@@ -406,7 +387,6 @@ class LaberintSolver(Node):
                     self.stuck_timer_start = self.get_clock().now()
                     return
 
-        # ── 1. APPROACHING_INTERSECTION ──
         if self.mode == "APPROACHING_INTERSECTION":
             if lmin < rmin and lmin < 0.40:
                 err = lmin - 0.155
@@ -427,7 +407,6 @@ class LaberintSolver(Node):
             self.log_event(f"Posición lista (F:{grado_cero:.2f}m). Evaluando cruce...")
             return
 
-        # ── 2. ANALYZING_NODE (Jerarquía Corregida) ──
         if self.mode == "ANALYZING_NODE":
             frente_abierto = self.savg(0, 15) > 0.29
             izq_abierto = self.savg(90, 15) > 0.35 or self.savg(45, 30) > 0.45
@@ -441,7 +420,6 @@ class LaberintSolver(Node):
             fp = [normalize_angle(self.yaw + ang) for ang in caminos_detectados_relativos]
             cf = normalize_angle(self.yaw + math.pi)
 
-            # --- CORRECCIÓN DE JERARQUÍA ABSOLUTA PARA RETORNO ---
             if len(fp) == 0:
                 val_L = max(self.savg(90, 20), self.savg(45, 20))
                 val_R = max(self.savg(270, 20), self.savg(315, 20))
@@ -465,7 +443,6 @@ class LaberintSolver(Node):
                     self.mode = "TURN_180"
                 return
 
-            # Si hay salidas viables y estamos en modo RETORNO, evaluamos topología ANTES que las curvas simples
             if self.returning_to_parent:
                 es_el_padre_real = False
                 if self.current_node:
@@ -516,14 +493,12 @@ class LaberintSolver(Node):
                         self.target_yaw = best_dir
                         self.mode = "EXECUTING_TURN"
                 else:
-                    # CASO B: Cruce intermedio detectado a la vuelta. ¡DETENEMOS EL RETORNO!
                     self.log_event(f"Bifurcación intermedia detectada al volver (Dist al padre: {dist_al_padre:.2f}m). Evaluando como nuevo nodo.")
                     self.returning_to_parent = False
                     cf_hacia_padre = self.yaw
                     self.process_topological_node(fp, cf_hacia_padre)
                 return
 
-            # Si NO estamos volviendo, exploración normal directa
             if len(fp) == 1:
                 if fp[0] == 0.0:
                     self.log_event("Falsa alarma (Solo frente). Aplicando venda y cruzando.")
@@ -538,7 +513,6 @@ class LaberintSolver(Node):
                 self.log_event(f"Cruce nuevo ({len(fp)} vías). F:{frente_abierto} L:{izq_abierto} R:{der_abierto}")
                 self.process_topological_node(fp, cf)
 
-        # ── 3. EXECUTING_TURN ──
         if self.mode == "EXECUTING_TURN":
             if self.execute_safe_turn(self.target_yaw, self.ANGULAR_SPEED):
                 self.mode = "EXPLORING"
@@ -547,7 +521,6 @@ class LaberintSolver(Node):
                 self.log_event("Giro completado.")
             return
 
-        # ── 4. TURN_180 ──
         if self.mode == "TURN_180":
             if self.execute_safe_turn(self.target_yaw, self.ANGULAR_SPEED * 0.8):
                 if self.backtrack_after_turn:
@@ -559,9 +532,6 @@ class LaberintSolver(Node):
                 self.in_intersection_zone = True
             return
 
-        # ══════════════════════════════════════════
-        # 5. EXPLORING — WALL FOLLOWING
-        # ══════════════════════════════════════════
         if lmin < 0.30 and rmin < 0.30:
             self.in_intersection_zone = False
 
@@ -570,8 +540,7 @@ class LaberintSolver(Node):
         has_lat = izq_abierto_mov or der_abierto_mov
 
         if abs(self.last_angular) > 0.15: has_lat = False
-        
-        # ── INTERRUPTOR DE COOLDOWN POR RADIO DE DISTANCIA ──
+
         if self.detection_cooldown:
             dist_desde_nodo = dist2d(self.pos_x, self.pos_y, self.cooldown_x, self.cooldown_y)
             if dist_desde_nodo >= self.COOLDOWN_DISTANCE:
@@ -587,7 +556,6 @@ class LaberintSolver(Node):
                 elif frmin < 0.20 or rmin < 0.16:
                     deficit = max(0.20 - frmin, 0.16 - rmin)
 
-        # --- GATILLO 1 REPARADO: Se quita el freno de fmin > 0.60 para evitar puntos ciegos ---
         if has_lat and not self.detection_cooldown and not self.in_intersection_zone:
             self.stop()
             self.mode = "ANALYZING_NODE" 
@@ -596,7 +564,6 @@ class LaberintSolver(Node):
             self.log_event("Hueco lateral detectado en tránsito. Analizando...")
             return
 
-        # --- GATILLO 2: FRENO EN CURVAS Y T ---
         elif not self.detection_cooldown and fmin <= self.WALL_STOP and has_lat:
             self.stop()
             self.mode = "ANALYZING_NODE"
@@ -605,7 +572,6 @@ class LaberintSolver(Node):
             self.log_event(f"Pared frontal a {fmin:.2f}m. Evaluando...")
             return
 
-        # Cul-de-sac
         back_dist = self.savg(180, 24)
         if fmin < 0.20 and lmin < 0.20 and rmin < 0.20 and back_dist > 0.30:
             has_exit = False
@@ -618,14 +584,10 @@ class LaberintSolver(Node):
                 self.backtrack_after_turn = True
                 self.mode = "TURN_180"; return
 
-        # ── FRENO FRONTAL ──
         if fmin < self.FRONT_BRAKE:
             td = 1.0 if lmin > rmin else -1.0
             self.cmd(0, td * self.ANGULAR_SPEED * 0.6); return
 
-        # ══════════════════════════════════════════
-        # WALL FOLLOWING ORIGINAL CONFIG
-        # ══════════════════════════════════════════
         TARGET = 0.155        
         TARGET_DIAG = 0.220   
         WALL_VISIBLE = 0.32   
