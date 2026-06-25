@@ -1,7 +1,6 @@
 #!/usr/bin/env python3
 
 import math
-from datetime import datetime
 from collections import defaultdict
 import rclpy
 from rclpy.node import Node
@@ -29,10 +28,6 @@ class CoreNavigator(Node):
     def __init__(self):
         super().__init__('core_navigator')
         
-        self.doc_name = f"sys_record_{datetime.now().strftime('%Y%m%d_%H%M%S')}.txt"
-        with open(self.doc_name, 'w') as doc:
-            doc.write("=== SESSION START ===\n")
-
         self.vel_fwd = 0.02
         self.vel_slow = 0.01
         self.vel_min = 0.0
@@ -92,19 +87,6 @@ class CoreNavigator(Node):
         self.create_subscription(Odometry, '/odom', self.cb_kinematics, custom_qos)
         self.create_subscription(Bool, '/meta', self.cb_target, 10)
         self.create_timer(0.1, self.main_tick)
-        self.write_record("SYSTEM ONLINE. Module initialized successfully.")
-
-    def write_record(self, txt, detail=""):
-        if not self.laser_arr: return
-        v_f, v_fl, v_l = self.get_mean(0), self.get_mean(45), self.get_mean(90)
-        v_r, v_fr, v_b = self.get_mean(270), self.get_mean(315), self.get_mean(180)
-        stamp = datetime.now().strftime('%H:%M:%S.%f')[:-3]
-        entry = f"[{stamp}] {txt.ljust(45)} | F:{v_f:.2f} FL:{v_fl:.2f} L:{v_l:.2f} R:{v_r:.2f} FR:{v_fr:.2f} B:{v_b:.2f}"
-        if detail: entry += f" | {detail}"
-        self.get_logger().info(entry)
-        try:
-            with open(self.doc_name,'a') as doc: doc.write(entry+"\n")
-        except: pass
 
     def cb_laser(self, msg):
         if not msg.ranges: return
@@ -125,16 +107,23 @@ class CoreNavigator(Node):
     
     def get_mean(self, deg, span=10):
         arr=self.get_slice(deg,span); return sum(arr)/len(arr) if arr else 2.0
+        
     def get_min(self, deg, span=10):
         arr=self.get_slice(deg,span); return min(arr) if arr else 2.0
+        
     def fetch_front(self):
         return min(self.get_min(0,20),self.get_min(10,14),self.get_min(350,14)), self.get_mean(0,28)
+        
     def fetch_sides(self):
         return self.get_min(90,24),self.get_min(270,24),self.get_min(45,18),self.get_min(315,18)
+        
     def push_vel(self, lin, ang):
         t=Twist(); t.linear.x,t.angular.z=float(lin),float(ang); self.pub_vel.publish(t)
+        
     def halt(self): self.push_vel(0,0)
+    
     def constrain(self, val, bottom, top): return max(bottom,min(top,val))
+    
     def get_grid(self, px, py): return (round(px/self.map_res),round(py/self.map_res))
     
     def filter_spin(self, trg):
@@ -183,17 +172,14 @@ class CoreNavigator(Node):
             mod=False; chunk="".join(self.char_hist[-3:])
             rules={"LBL":"S","RBR":"S","LBS":"R","RBS":"L","SBL":"R","SBR":"L","LBR":"B","RBL":"B","SBS":"B"}
             if chunk in rules:
-                self.char_hist=self.char_hist[:-3]+list(rules[chunk])
-                self.write_record(f"Path compression: {chunk} -> {rules[chunk]}"); mod=True
+                self.char_hist=self.char_hist[:-3]+list(rules[chunk]); mod=True
 
     def eval_intersection(self, routes, origin_route):
         if self.is_reversing:
-            self.write_record("Backtracking to parent successful.")
             self.is_reversing=False
             self.char_hist.append('B'); self.reduce_hist()
             ptr=self.active_idx
             if ptr is None:
-                self.write_record("Generating root topological entry.")
                 ptr={'uid':len(self.node_net),'open':routes.copy(),'up':None,
                       'src':origin_route,'dst':None,'nx':self.curr_x,'ny':self.curr_y}
                 self.node_net.append(ptr); self.active_idx=ptr
@@ -208,15 +194,12 @@ class CoreNavigator(Node):
             if found_ptr:
                 ptr = found_ptr
                 self.active_idx = ptr
-                self.write_record(f"Entry #{ptr['uid']} re-accessed ({len(ptr['open'])} remaining)")
             else:
                 ptr={'uid':len(self.node_net),'open':routes.copy(),'up':self.active_idx,
                       'src':origin_route,'dst':None,'nx':self.curr_x,'ny':self.curr_y}
                 self.node_net.append(ptr); self.active_idx=ptr
-                self.write_record(f"Entry #{ptr['uid']} logged ({len(routes)} branches)")
 
         if not ptr['open']:
-            self.write_record("Dead end node. Flushing memory bounds.")
             self.node_net = []
             self.active_idx = None
             self.is_reversing = False
@@ -245,7 +228,6 @@ class CoreNavigator(Node):
             ok_routes = [op for op in routes if abs(calc_offset(op, origin_route)) > 0.5]
         
         if not ok_routes:
-            self.write_record("No valid branches found. Resetting state.")
             self.node_net = []
             self.active_idx = None
             self.is_reversing = False
@@ -275,7 +257,6 @@ class CoreNavigator(Node):
         self.rec_char(top_h); self.reduce_hist()
         self.aim_h=top_h
         self.status="STATE_ROT"
-        self.write_record(f"Routing to relative angle: {math.degrees(calc_offset(top_h,self.curr_h)):.0f} deg")
 
     def eval_heat(self, rel_d):
         th=self.curr_h+math.radians(rel_d); p=0.0
@@ -299,8 +280,7 @@ class CoreNavigator(Node):
     def main_tick(self):
         if not self.laser_arr or self.is_done: return
         if self.goal_flag:
-            self.halt(); self.is_done=True
-            self.write_record(f"MISSION ACCOMPLISHED. Sequence: {''.join(self.char_hist)}"); return
+            self.halt(); self.is_done=True; return
 
         min_f, mean_f = self.fetch_front()
         min_l, min_r, min_fl, min_fr = self.fetch_sides()
@@ -311,7 +291,6 @@ class CoreNavigator(Node):
                 self.halt()
                 self.status = "STATE_DRIVE"
                 self.trigger_cd()
-                self.write_record("Disengagement complete. Resuming drive.")
                 self.time_mark = self.get_clock().now()
                 return
             
@@ -320,7 +299,6 @@ class CoreNavigator(Node):
                 self.halt()
                 self.status = "STATE_DRIVE"
                 self.trigger_cd()
-                self.write_record("Disengagement aborted: Rear proximity alert.")
                 self.time_mark = self.get_clock().now()
                 return
             
@@ -339,7 +317,6 @@ class CoreNavigator(Node):
                 if self.flag_reverse:
                     self.flag_reverse = False
                     self.is_reversing = True
-                    self.write_record("Lock detected. Reverting memory sequence.")
                 
                 self.evd_lin = -1.0 
                 if min_l < min_r:
@@ -347,7 +324,6 @@ class CoreNavigator(Node):
                 else:
                     self.evd_ang = 0.08
                     
-                self.write_record(f"CRITICAL LOCK ({stuck_t:.1f}s). Executing evasive maneuver.")
                 self.status = "STATE_FREE"
                 return
         else:
@@ -372,7 +348,6 @@ class CoreNavigator(Node):
                     if self.flag_reverse:
                         self.flag_reverse = False
                         self.is_reversing = True
-                        self.write_record("Lock detected. Reverting memory sequence.")
                     
                     self.evd_lin = -1.0 
                     if min_l < min_r:
@@ -380,7 +355,6 @@ class CoreNavigator(Node):
                     else:
                         self.evd_ang = 0.08
                         
-                    self.write_record(f"PHYSICAL JAM ({t_area:.1f}s variance). Executing evasive maneuver.")
                     self.status = "STATE_FREE"
                     
                     self.jam_x = self.curr_x
@@ -405,7 +379,6 @@ class CoreNavigator(Node):
 
             self.halt()
             self.status = "STATE_SCAN"
-            self.write_record(f"Position secured (F:{f_zero:.2f}m). Scanning...")
             return
 
         if self.status == "STATE_SCAN":
@@ -426,19 +399,15 @@ class CoreNavigator(Node):
                 v_r = max(self.get_mean(270, 20), self.get_mean(315, 20))
                 
                 if v_l > 0.30 and v_l > (v_r + 0.10):
-                    self.write_record(f"Asymmetric left bypass (L:{v_l:.2f}). Adjusting.")
                     self.aim_h = wrap_rads(self.curr_h + self.rad_limit)
                     self.status = "STATE_ROT"
                 elif v_r > 0.30 and v_r > (v_l + 0.10):
-                    self.write_record(f"Asymmetric right bypass (R:{v_r:.2f}). Adjusting.")
                     self.aim_h = wrap_rads(self.curr_h - self.rad_limit)
                     self.status = "STATE_ROT"
                 elif v_l > 0.30 and v_r > 0.45:
-                    self.write_record(f"Blind T-Junction handled. Forcing lateral motion.")
                     self.aim_h = wrap_rads(self.curr_h + self.rad_limit) if v_l > v_r else wrap_rads(self.curr_h - self.rad_limit)
                     self.status = "STATE_ROT"
                 else:
-                    self.write_record(f"Dead end confirmed. Engaging 180 deg maneuver.")
                     self.aim_h = wrap_rads(self.curr_h + math.pi)
                     self.trigger_cd()
                     self.status = "STATE_U"
@@ -452,7 +421,6 @@ class CoreNavigator(Node):
                         is_parent = True
 
                 if self.active_idx is None or is_parent:
-                    self.write_record("Parent node alignment complete.")
                     self.is_reversing = False
                     self.char_hist.append('B')
                     self.reduce_hist()
@@ -472,15 +440,12 @@ class CoreNavigator(Node):
                                     
                         if min_err < 0.8: 
                             self.active_idx['open'].pop(opt_idx)
-                            self.write_record("Topological restore: Unexplored route loaded.")
                         else:
-                            self.write_record("Warning: Vector mismatch. Applying secondary routing.")
                             opt_h = abs_opts[-1] if len(abs_opts) > 1 else abs_opts[0]
                             
                         self.aim_h = opt_h
                         self.status = "STATE_ROT"
                     else:
-                        self.write_record("Parent exhausted. Re-evaluating graph.")
                         self.node_net = []
                         self.active_idx = None
                         self.is_reversing = False
@@ -494,7 +459,6 @@ class CoreNavigator(Node):
                         self.aim_h = opt_h
                         self.status = "STATE_ROT"
                 else:
-                    self.write_record(f"Intermediate branch detected (Err: {d_p:.2f}m). Registering logic.")
                     self.is_reversing = False
                     back_ptr = self.curr_h
                     self.eval_intersection(abs_opts, back_ptr)
@@ -502,15 +466,12 @@ class CoreNavigator(Node):
 
             if len(abs_opts) == 1:
                 if abs_opts[0] == 0.0:
-                    self.write_record("Signal anomaly (Front bias). Ignoring.")
                     self.status = "STATE_DRIVE"
                     self.trigger_cd()
                 else:
-                    self.write_record("Mandatory curve detected. Executing.")
                     self.aim_h = abs_opts[0]
                     self.status = "STATE_ROT"
             else:
-                self.write_record(f"Node entry ({len(abs_opts)} branches). F:{f_clear} L:{l_clear} R:{r_clear}")
                 self.eval_intersection(abs_opts, back_h)
 
         if self.status == "STATE_ROT":
@@ -518,7 +479,6 @@ class CoreNavigator(Node):
                 self.status = "STATE_DRIVE"
                 self.trigger_cd()
                 self.inside_junc = True
-                self.write_record("Rotation sequence completed.")
             return
 
         if self.status == "STATE_U":
@@ -526,7 +486,6 @@ class CoreNavigator(Node):
                 if self.flag_reverse:
                     self.flag_reverse = False
                     self.is_reversing = True
-                    self.write_record("180 sequence passed. Awaiting parent data.")
                 self.status = "STATE_DRIVE"
                 self.trigger_cd()
                 self.inside_junc = True
@@ -546,7 +505,6 @@ class CoreNavigator(Node):
             if cd_offset >= self.cd_dist:
                 self.cd_active = False
                 self.inside_junc = False 
-                self.get_logger().info("CD TERMINATED: Exit phase confirmed.")
             else: 
                 lat_sig = False
                 self.inside_junc = True
@@ -561,7 +519,6 @@ class CoreNavigator(Node):
             self.status = "STATE_SCAN" 
             self.chk_x, self.chk_y = self.curr_x, self.curr_y
             self.inside_junc = True
-            self.write_record("Lateral gap threshold met. Halting for scan.")
             return
 
         elif not self.cd_active and min_f <= self.wall_gap and lat_sig:
@@ -569,7 +526,6 @@ class CoreNavigator(Node):
             self.status = "STATE_SCAN"
             self.chk_x, self.chk_y = self.curr_x, self.curr_y
             self.inside_junc = True
-            self.write_record(f"Frontal barrier threshold met ({min_f:.2f}m). Pre-eval.")
             return
 
         s_back = self.get_mean(180, 24)
@@ -579,7 +535,6 @@ class CoreNavigator(Node):
                 if 140 <= dx <= 220: continue
                 if self.get_mean(dx, 14) > 0.30: esc = True; break
             if not esc:
-                self.write_record("BLIND ALLEY WARNING. Forcing 180 vector.")
                 self.aim_h = wrap_rads(self.curr_h + math.pi)
                 self.flag_reverse = True
                 self.status = "STATE_U"; return
