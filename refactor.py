@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 
 import math
+from datetime import datetime
 from collections import defaultdict
 import rclpy
 from rclpy.node import Node
@@ -10,578 +11,582 @@ from sensor_msgs.msg import LaserScan
 from nav_msgs.msg import Odometry
 from std_msgs.msg import Bool
 
-def fetch_yaw(q):
-    vy = 2.0 * (q.w * q.z + q.x * q.y)
-    vx = 1.0 - 2.0 * (q.y * q.y + q.z * q.z)
-    return math.atan2(vy, vx)
+def quaternion_to_yaw(q):
+    siny_cosp = 2.0 * (q.w * q.z + q.x * q.y)
+    cosy_cosp = 1.0 - 2.0 * (q.y * q.y + q.z * q.z)
+    return math.atan2(siny_cosp, cosy_cosp)
 
-def calc_offset(a1, a2):
-    return math.atan2(math.sin(a1 - a2), math.cos(a1 - a2))
+def angle_diff(a, b):
+    return math.atan2(math.sin(a - b), math.cos(a - b))
 
-def wrap_rads(ang):
-    return math.atan2(math.sin(ang), math.cos(ang))
+def normalize_angle(a):
+    return math.atan2(math.sin(a), math.cos(a))
 
-def calc_hypot(x_a, y_a, x_b, y_b):
-    return math.sqrt((x_a - x_b)**2 + (y_a - y_b)**2)
+def dist2d(x1, y1, x2, y2):
+    return math.sqrt((x1 - x2)**2 + (y1 - y2)**2)
 
-class CoreNavigator(Node):
+class LaberintSolver(Node):
     def __init__(self):
-        super().__init__('core_navigator')
+        super().__init__('laberint_solver')
         
-        self.vel_fwd = 0.02
-        self.vel_slow = 0.01
-        self.vel_min = 0.0
-        self.spin_max = 0.25
-        self.stop_th = 0.12
-        self.slow_th = 0.25
-        self.panic_s = 0.12
-        self.panic_d = 0.14
-        self.blind_th = 0.05
+        self.LINEAR_SPEED = 0.02
+        self.SLOW_SPEED = 0.01
+        self.MIN_SPEED = 0.0
+        self.ANGULAR_SPEED = 0.25
+        self.FRONT_BRAKE = 0.12
+        self.FRONT_SLOW = 0.25
+        self.SIDE_PANIC = 0.12
+        self.DIAG_PANIC = 0.14
+        self.CHASSIS_FILTER = 0.05
 
-        self.wall_gap = 0.20
-        self.deg_limit = 55
-        self.rad_limit = math.radians(self.deg_limit)
+        self.WALL_STOP = 0.20
+        self.TURN_ANGLE = 55
+        self.TURN_ANGLE_RAD = math.radians(self.TURN_ANGLE)
 
-        self.time_mark = self.get_clock().now()
-        self.evd_x = 0.0
-        self.evd_y = 0.0
-        self.evd_lin = -1.0
-        self.evd_ang = 0.0
+        self.last_movement_time = self.get_clock().now()
+        self.escape_start_x = 0.0
+        self.escape_start_y = 0.0
+        self.escape_dir_linear = -1.0
+        self.escape_dir_angular = 0.0
 
-        self.laser_arr = None
-        self.is_done = False
-        self.goal_flag = False
-        self.curr_x = self.curr_y = self.curr_h = 0.0
-        self.map_res = 0.30
-        self.heat_map = defaultdict(int)
+        self.scan_data = None
+        self.finished = False
+        self.meta_reached = False
+        self.pos_x = self.pos_y = self.yaw = 0.0
+        self.grid_res = 0.30
+        self.visited_cells = defaultdict(int)
 
-        self.node_net = []
-        self.active_idx = None
-        self.is_reversing = False
-        self.char_hist = []
-        self.gap_th = 0.35  
+        self.topological_graph = []
+        self.current_node = None
+        self.returning_to_parent = False
+        self.path_letters = []
+        self.INTERSECT_OPEN_THRESHOLD = 0.35  
 
-        self.status = "STATE_DRIVE"
-        self.aim_h = 0.0
-        self.flag_reverse = False
+        self.mode = "EXPLORING"
+        self.target_yaw = 0.0
+        self.backtrack_after_turn = False
 
-        self.cd_active = False
-        self.cd_origin_x = self.cd_origin_y = 0.0
-        self.cd_dist = 0.10
-        self.inside_junc = False
-        self.chk_x = self.chk_y = 0.0
+        self.detection_cooldown = False
+        self.cooldown_x = self.cooldown_y = 0.0
+        self.COOLDOWN_DISTANCE = 0.10
+        self.in_intersection_zone = False
+        self.verify_start_x = self.verify_start_y = 0.0
 
-        self.prev_w = 0.0
-        self.w_step = 0.12
-        self.prev_best_h = 0.0
+        self.last_angular = 0.0
+        self.max_ang_step = 0.12
+        self.last_best_angle = 0.0
 
-        self.jam_x = 0.0
-        self.jam_y = 0.0
-        self.jam_time = self.get_clock().now()
-        self.jam_rad = 0.05
+        self.stuck_ref_x = 0.0
+        self.stuck_ref_y = 0.0
+        self.stuck_timer_start = self.get_clock().now()
+        self.STUCK_RADIUS = 0.05
 
-        self.pub_vel = self.create_publisher(Twist, '/cmd_vel', 10)
-        custom_qos = QoSProfile(reliability=ReliabilityPolicy.BEST_EFFORT,
+        self.cmd_pub = self.create_publisher(Twist, '/cmd_vel', 10)
+        qos = QoSProfile(reliability=ReliabilityPolicy.BEST_EFFORT,
                          history=HistoryPolicy.KEEP_LAST, depth=10)
-        self.create_subscription(LaserScan, '/scan', self.cb_laser, custom_qos)
-        self.create_subscription(Odometry, '/odom', self.cb_kinematics, custom_qos)
-        self.create_subscription(Bool, '/meta', self.cb_target, 10)
-        self.create_timer(0.1, self.main_tick)
+        self.create_subscription(LaserScan, '/scan', self.scan_cb, qos)
+        self.create_subscription(Odometry, '/odom', self.odom_cb, qos)
+        self.create_subscription(Bool, '/meta', self.meta_cb, 10)
+        self.create_timer(0.1, self.control_loop)
 
-    def cb_laser(self, msg):
+    def scan_cb(self, msg):
         if not msg.ranges: return
-        self.laser_arr = [float('inf') if (r is None or math.isnan(r) or math.isinf(r) or r<=0 or r<self.blind_th) else min(r,2.0) for r in msg.ranges]
+        self.scan_data = [float('inf') if (r is None or math.isnan(r) or math.isinf(r) or r<=0 or r<self.CHASSIS_FILTER) else min(r,2.0) for r in msg.ranges]
 
-    def cb_kinematics(self, msg):
-        self.curr_x = msg.pose.pose.position.x
-        self.curr_y = msg.pose.pose.position.y
-        self.curr_h = fetch_yaw(msg.pose.pose.orientation)
-        self.heat_map[self.get_grid(self.curr_x, self.curr_y)] += 1
+    def odom_cb(self, msg):
+        self.pos_x = msg.pose.pose.position.x
+        self.pos_y = msg.pose.pose.position.y
+        self.yaw = quaternion_to_yaw(msg.pose.pose.orientation)
+        self.visited_cells[self.cell(self.pos_x, self.pos_y)] += 1
 
-    def cb_target(self, msg): self.goal_flag = bool(msg.data)
+    def meta_cb(self, msg): self.meta_reached = bool(msg.data)
 
-    def get_slice(self, deg, span=10):
-        if not self.laser_arr: return []
-        tot=len(self.laser_arr); deg=int(deg)%tot; half=span//2
-        return [min(self.laser_arr[(deg+i)%tot],2.0) for i in range(-half,half+1) if self.laser_arr[(deg+i)%tot]>0.01 and not math.isinf(self.laser_arr[(deg+i)%tot])]
+    def svals(self, ca, w=10):
+        if not self.scan_data: return []
+        n=len(self.scan_data); ca=int(ca)%n; h=w//2
+        return [min(self.scan_data[(ca+o)%n],2.0) for o in range(-h,h+1) if self.scan_data[(ca+o)%n]>0.01 and not math.isinf(self.scan_data[(ca+o)%n])]
     
-    def get_mean(self, deg, span=10):
-        arr=self.get_slice(deg,span); return sum(arr)/len(arr) if arr else 2.0
+    def savg(self, ca, w=10):
+        v=self.svals(ca,w); return sum(v)/len(v) if v else 2.0
         
-    def get_min(self, deg, span=10):
-        arr=self.get_slice(deg,span); return min(arr) if arr else 2.0
+    def smin(self, ca, w=10):
+        v=self.svals(ca,w); return min(v) if v else 2.0
         
-    def fetch_front(self):
-        return min(self.get_min(0,20),self.get_min(10,14),self.get_min(350,14)), self.get_mean(0,28)
+    def front_metrics(self):
+        return min(self.smin(0,20),self.smin(10,14),self.smin(350,14)), self.savg(0,28)
         
-    def fetch_sides(self):
-        return self.get_min(90,24),self.get_min(270,24),self.get_min(45,18),self.get_min(315,18)
+    def side_metrics(self):
+        return self.smin(90,24),self.smin(270,24),self.smin(45,18),self.smin(315,18)
         
-    def push_vel(self, lin, ang):
-        t=Twist(); t.linear.x,t.angular.z=float(lin),float(ang); self.pub_vel.publish(t)
+    def cmd(self, l, a):
+        m=Twist(); m.linear.x,m.angular.z=float(l),float(a); self.cmd_pub.publish(m)
         
-    def halt(self): self.push_vel(0,0)
+    def stop(self): self.cmd(0,0)
     
-    def constrain(self, val, bottom, top): return max(bottom,min(top,val))
+    def clamp(self, v, lo, hi): return max(lo,min(hi,v))
     
-    def get_grid(self, px, py): return (round(px/self.map_res),round(py/self.map_res))
+    def cell(self, x, y): return (round(x/self.grid_res),round(y/self.grid_res))
     
-    def filter_spin(self, trg):
-        self.prev_w=self.constrain(self.prev_w+self.constrain(trg-self.prev_w,-self.w_step,self.w_step),-self.spin_max,self.spin_max)
-        return self.prev_w
+    def smooth_ang(self, t):
+        self.last_angular=self.clamp(self.last_angular+self.clamp(t-self.last_angular,-self.max_ang_step,self.max_ang_step),-self.ANGULAR_SPEED,self.ANGULAR_SPEED)
+        return self.last_angular
         
-    def trigger_cd(self):
-        self.cd_active = True
-        self.cd_origin_x = self.curr_x
-        self.cd_origin_y = self.curr_y
+    def activate_cooldown(self):
+        self.detection_cooldown = True
+        self.cooldown_ticks = 30
+        self.cooldown_x = self.pos_x
+        self.cooldown_y = self.pos_y
 
-    def find_gaps(self):
-        opts = []
-        for d in [0, 180]:
-            arr = self.get_slice(d, 24)
-            if arr and sum(arr)/len(arr) >= self.gap_th:
-                opts.append(wrap_rads(self.curr_h + math.radians(d)))
-        for sd in [90, 270]:
-            best_val = 0.0
-            for os in [-10, 0, 10]:
-                arr = self.get_slice(sd+os, 14)
-                if arr:
-                    val = sum(arr)/len(arr)
-                    if val > best_val: best_val = val
-            if best_val >= self.gap_th:
-                rot = self.rad_limit if sd == 90 else -self.rad_limit
-                opts.append(wrap_rads(self.curr_h + rot))
-        return opts
+    def get_open_directions(self):
+        dirs = []
+        for a in [0, 180]:
+            v = self.svals(a, 24)
+            if v and sum(v)/len(v) >= self.INTERSECT_OPEN_THRESHOLD:
+                dirs.append(normalize_angle(self.yaw + math.radians(a)))
+        for sc in [90, 270]:
+            bd = 0.0
+            for off in [-10, 0, 10]:
+                v = self.svals(sc+off, 14)
+                if v:
+                    d = sum(v)/len(v)
+                    if d > bd: bd = d
+            if bd >= self.INTERSECT_OPEN_THRESHOLD:
+                turn = self.TURN_ANGLE_RAD if sc == 90 else -self.TURN_ANGLE_RAD
+                dirs.append(normalize_angle(self.yaw + turn))
+        return dirs
 
-    def exec_rot(self, trg_h, max_w):
-        err = calc_offset(trg_h, self.curr_h)
-        if abs(err) < 0.05:
-            self.halt(); return True
-        w_val = min(abs(err) * 1.5, max_w)
-        if w_val < 0.08: w_val = 0.08
-        self.push_vel(0, w_val if err > 0 else -w_val)
+    def execute_safe_turn(self, target_yaw, angular_speed):
+        diff = angle_diff(target_yaw, self.yaw)
+        if abs(diff) < 0.05:
+            self.cmd(0, 0); return True
+        speed = min(abs(diff) * 1.5, angular_speed)
+        if speed < 0.08: speed = 0.08
+        self.cmd(0, speed if diff > 0 else -speed)
         return False
 
-    def rec_char(self, trg_a):
-        diff=math.degrees(calc_offset(trg_a,self.curr_h))
-        self.char_hist.append('L' if diff>45 else 'R' if diff<-45 else 'S')
+    def log_turn_letter(self, ta):
+        d=math.degrees(angle_diff(ta,self.yaw))
+        self.path_letters.append('L' if d>45 else 'R' if d<-45 else 'S')
         
-    def reduce_hist(self):
-        mod=True
-        while mod and len(self.char_hist)>=3:
-            mod=False; chunk="".join(self.char_hist[-3:])
-            rules={"LBL":"S","RBR":"S","LBS":"R","RBS":"L","SBL":"R","SBR":"L","LBR":"B","RBL":"B","SBS":"B"}
-            if chunk in rules:
-                self.char_hist=self.char_hist[:-3]+list(rules[chunk]); mod=True
+    def simplify_path(self):
+        changed=True
+        while changed and len(self.path_letters)>=3:
+            changed=False; seq="".join(self.path_letters[-3:])
+            reps={"LBL":"S","RBR":"S","LBS":"R","RBS":"L","SBL":"R","SBR":"L","LBR":"B","RBL":"B","SBS":"B"}
+            if seq in reps:
+                self.path_letters=self.path_letters[:-3]+list(reps[seq])
+                changed=True
 
-    def eval_intersection(self, routes, origin_route):
-        if self.is_reversing:
-            self.is_reversing=False
-            self.char_hist.append('B'); self.reduce_hist()
-            ptr=self.active_idx
-            if ptr is None:
-                ptr={'uid':len(self.node_net),'open':routes.copy(),'up':None,
-                      'src':origin_route,'dst':None,'nx':self.curr_x,'ny':self.curr_y}
-                self.node_net.append(ptr); self.active_idx=ptr
+    def process_topological_node(self, paths, came_from):
+        if self.returning_to_parent:
+            self.returning_to_parent=False
+            self.path_letters.append('B'); self.simplify_path()
+            node=self.current_node
+            if node is None:
+                node={'id':len(self.topological_graph),'unexplored':paths.copy(),'parent':None,
+                      'came_from':came_from,'going_to':None,'x':self.pos_x,'y':self.pos_y}
+                self.topological_graph.append(node); self.current_node=node
         else:
-            merge_th = 0.15
-            found_ptr = None
-            for p in self.node_net:
-                if calc_hypot(self.curr_x, self.curr_y, p['nx'], p['ny']) < merge_th:
-                    found_ptr = p
+            NODE_MERGE_DIST = 0.15
+            existing_node = None
+            for n in self.topological_graph:
+                if dist2d(self.pos_x, self.pos_y, n['x'], n['y']) < NODE_MERGE_DIST:
+                    existing_node = n
                     break
 
-            if found_ptr:
-                ptr = found_ptr
-                self.active_idx = ptr
+            if existing_node:
+                node = existing_node
+                self.current_node = node
             else:
-                ptr={'uid':len(self.node_net),'open':routes.copy(),'up':self.active_idx,
-                      'src':origin_route,'dst':None,'nx':self.curr_x,'ny':self.curr_y}
-                self.node_net.append(ptr); self.active_idx=ptr
+                node={'id':len(self.topological_graph),'unexplored':paths.copy(),'parent':self.current_node,
+                      'came_from':came_from,'going_to':None,'x':self.pos_x,'y':self.pos_y}
+                self.topological_graph.append(node); self.current_node=node
 
-        if not ptr['open']:
-            self.node_net = []
-            self.active_idx = None
-            self.is_reversing = False
-            self.char_hist = []
+        if not node['unexplored']:
+            self.topological_graph = []
+            self.current_node = None
+            self.returning_to_parent = False
+            self.path_letters = []
             
-            top_h, top_w = routes[0], float('inf')
-            for r in routes:
-                w = self.heat_map.get(self.get_grid(self.curr_x+0.35*math.cos(r), self.curr_y+0.35*math.sin(r)), 0)
-                if w < top_w: 
-                    top_w, top_h = w, r
+            best_dir, best_v = paths[0], float('inf')
+            for d in paths:
+                v = self.visited_cells.get(self.cell(self.pos_x+0.35*math.cos(d), self.pos_y+0.35*math.sin(d)), 0)
+                if v < best_v: 
+                    best_v, best_dir = v, d
                     
-            self.aim_h = top_h
-            self.status = "STATE_ROT"
+            self.target_yaw = best_dir
+            self.mode = "EXECUTING_TURN"
             return
 
-        ok_routes = []
-        for r in ptr['open']:
-            if abs(calc_offset(r, origin_route)) < 0.5:
+        valid = []
+        for d in node['unexplored']:
+            if abs(angle_diff(d, came_from)) < 0.5:
                 continue
-            for op in routes:
-                if abs(calc_offset(r, op)) < 0.8:
-                    ok_routes.append(r)
+            for p in paths:
+                if abs(angle_diff(d, p)) < 0.8:
+                    valid.append(d)
                     break
         
-        if not ok_routes:
-            ok_routes = [op for op in routes if abs(calc_offset(op, origin_route)) > 0.5]
+        if not valid:
+            valid = [p for p in paths if abs(angle_diff(p, came_from)) > 0.5]
         
-        if not ok_routes:
-            self.node_net = []
-            self.active_idx = None
-            self.is_reversing = False
-            self.char_hist = []
+        if not valid:
+            self.topological_graph = []
+            self.current_node = None
+            self.returning_to_parent = False
+            self.path_letters = []
             
-            top_h, top_w = routes[0], float('inf')
-            for r in routes:
-                w = self.heat_map.get(self.get_grid(self.curr_x+0.35*math.cos(r), self.curr_y+0.35*math.sin(r)), 0)
-                if w < top_w: 
-                    top_w, top_h = w, r
+            best_dir, best_v = paths[0], float('inf')
+            for d in paths:
+                v = self.visited_cells.get(self.cell(self.pos_x+0.35*math.cos(d), self.pos_y+0.35*math.sin(d)), 0)
+                if v < best_v: 
+                    best_v, best_dir = v, d
                     
-            self.aim_h = top_h
-            self.status = "STATE_ROT"
+            self.target_yaw = best_dir
+            self.mode = "EXECUTING_TURN"
             return
 
-        top_h,top_w,top_idx=ok_routes[0],float('inf'),0
-        for idx,r in enumerate(ok_routes):
-            w=self.heat_map.get(self.get_grid(self.curr_x+0.35*math.cos(r),self.curr_y+0.35*math.sin(r)),0)
-            if w<top_w: top_w,top_h,top_idx=w,r,idx
+        best_dir,best_v,best_i=valid[0],float('inf'),0
+        for i,d in enumerate(valid):
+            v=self.visited_cells.get(self.cell(self.pos_x+0.35*math.cos(d),self.pos_y+0.35*math.sin(d)),0)
+            if v<best_v: best_v,best_dir,best_i=v,d,i
         
-        for k, r in enumerate(ptr['open']):
-            if abs(calc_offset(r, top_h)) < 0.8:
-                ptr['open'].pop(k)
+        for j, d in enumerate(node['unexplored']):
+            if abs(angle_diff(d, best_dir)) < 0.8:
+                node['unexplored'].pop(j)
                 break
         
-        ptr['dst']=top_h
-        self.rec_char(top_h); self.reduce_hist()
-        self.aim_h=top_h
-        self.status="STATE_ROT"
+        node['going_to']=best_dir
+        self.log_turn_letter(best_dir); self.simplify_path()
+        self.target_yaw=best_dir
+        self.mode="EXECUTING_TURN"
 
-    def eval_heat(self, rel_d):
-        th=self.curr_h+math.radians(rel_d); p=0.0
-        for dx in (0.3,0.6,0.9):
-            w=self.heat_map.get(self.get_grid(self.curr_x+dx*math.cos(th),self.curr_y+dx*math.sin(th)),0)
-            p+=1.6 if w==0 else 0.6 if w<3 else 0.0 if w<7 else -1.2
-        return p
+    def novelty_score(self, rel_deg):
+        ty=self.yaw+math.radians(rel_deg); s=0.0
+        for d in (0.3,0.6,0.9):
+            v=self.visited_cells.get(self.cell(self.pos_x+d*math.cos(ty),self.pos_y+d*math.sin(ty)),0)
+            s+=1.6 if v==0 else 0.6 if v<3 else 0.0 if v<7 else -1.2
+        return s
 
-    def scan_optimal_vec(self):
-        top_w,top_a=-1e9,0
+    def choose_best_angle(self):
+        bs,ba=-1e9,0
         for a in range(-95,96,5):
-            c_a=a%360; mean=self.get_mean(c_a,14); p_min=self.get_min(c_a,10); w_min=self.get_min(c_a,24)
-            scr=mean*1.8+p_min*0.8+w_min*1.8-abs(a)*0.015+self.eval_heat(a)
-            if w_min<0.20:scr-=6.0
-            elif w_min<0.26:scr-=3.0
-            if p_min<0.16:scr-=2.5
-            scr-=abs(a-self.prev_best_h)*0.005
-            if scr>top_w:top_w,top_a=scr,a
-        self.prev_best_h=top_a; return top_a,top_w
+            ca=a%360; avg=self.savg(ca,14); mn=self.smin(ca,10); mw=self.smin(ca,24)
+            s=avg*1.8+mn*0.8+mw*1.8-abs(a)*0.015+self.novelty_score(a)
+            if mw<0.20:s-=6.0
+            elif mw<0.26:s-=3.0
+            if mn<0.16:s-=2.5
+            s-=abs(a-self.last_best_angle)*0.005
+            if s>bs:bs,ba=s,a
+        self.last_best_angle=ba; return ba,bs
 
-    def main_tick(self):
-        if not self.laser_arr or self.is_done: return
-        if self.goal_flag:
-            self.halt(); self.is_done=True; return
-
-        min_f, mean_f = self.fetch_front()
-        min_l, min_r, min_fl, min_fr = self.fetch_sides()
-
-        if self.status == "STATE_FREE":
-            prog = calc_hypot(self.curr_x, self.curr_y, self.evd_x, self.evd_y)
-            if prog >= 0.08:
-                self.halt()
-                self.status = "STATE_DRIVE"
-                self.trigger_cd()
-                self.time_mark = self.get_clock().now()
-                return
-            
-            clear_b = self.get_mean(180, 20)
-            if clear_b < 0.14 or clear_b >= 2:
-                self.halt()
-                self.status = "STATE_DRIVE"
-                self.trigger_cd()
-                self.time_mark = self.get_clock().now()
-                return
-            
-            self.push_vel(self.vel_slow * self.evd_lin, self.evd_ang)
+    def control_loop(self):
+        if not self.scan_data or self.finished: return
+        if self.meta_reached:
+            self.stop(); self.finished=True
             return
 
-        if self.status in ["STATE_ROT", "STATE_U"] or min_f < self.stop_th:
-            stuck_t = (self.get_clock().now() - self.time_mark).nanoseconds / 1e9
-            th_time = 50.0 if self.status == "STATE_U" else 25.0
+        fmin, favg = self.front_metrics()
+        lmin, rmin, flmin, frmin = self.side_metrics()
+
+        if self.mode == "ESCAPING":
+            adv_escape = dist2d(self.pos_x, self.pos_y, self.escape_start_x, self.escape_start_y)
+            if adv_escape >= 0.08:
+                self.stop()
+                self.mode = "EXPLORING"
+                self.activate_cooldown()
+                self.last_movement_time = self.get_clock().now()
+                return
             
-            if stuck_t > th_time: 
-                self.halt()
-                self.evd_x = self.curr_x
-                self.evd_y = self.curr_y
+            back = self.savg(180, 20)
+            if back < 0.14 or back >= 2:
+                self.stop()
+                self.mode = "EXPLORING"
+                self.activate_cooldown()
+                self.last_movement_time = self.get_clock().now()
+                return
+            
+            self.cmd(self.SLOW_SPEED * self.escape_dir_linear, self.escape_dir_angular)
+            return
+
+        if self.mode in ["EXECUTING_TURN", "TURN_180"] or fmin < self.FRONT_BRAKE:
+            tiempo_atrapado = (self.get_clock().now() - self.last_movement_time).nanoseconds / 1e9
+            limite_tiempo = 50.0 if self.mode == "TURN_180" else 25.0
+            
+            if tiempo_atrapado > limite_tiempo: 
+                self.stop()
+                self.escape_start_x = self.pos_x
+                self.escape_start_y = self.pos_y
                 
-                if self.flag_reverse:
-                    self.flag_reverse = False
-                    self.is_reversing = True
+                if self.backtrack_after_turn:
+                    self.backtrack_after_turn = False
+                    self.returning_to_parent = True
                 
-                self.evd_lin = -1.0 
-                if min_l < min_r:
-                    self.evd_ang = -0.08 
+                self.escape_dir_linear = -1.0 
+                if lmin < rmin:
+                    self.escape_dir_angular = -0.08 
                 else:
-                    self.evd_ang = 0.08
+                    self.escape_dir_angular = 0.08
                     
-                self.status = "STATE_FREE"
+                self.mode = "ESCAPING"
                 return
         else:
-            self.time_mark = self.get_clock().now()
+            self.last_movement_time = self.get_clock().now()
 
-        if self.status != "STATE_FREE":
-            d_moved = calc_hypot(self.curr_x, self.curr_y, self.jam_x, self.jam_y)
-            t_area = (self.get_clock().now() - self.jam_time).nanoseconds / 1e9
+        if self.mode != "ESCAPING":
+            dist_recorrida = dist2d(self.pos_x, self.pos_y, self.stuck_ref_x, self.stuck_ref_y)
+            tiempo_en_zona = (self.get_clock().now() - self.stuck_timer_start).nanoseconds / 1e9
             
-            if d_moved > self.jam_rad:
-                self.jam_x = self.curr_x
-                self.jam_y = self.curr_y
-                self.jam_time = self.get_clock().now()
+            if dist_recorrida > self.STUCK_RADIUS:
+                self.stuck_ref_x = self.pos_x
+                self.stuck_ref_y = self.pos_y
+                self.stuck_timer_start = self.get_clock().now()
             else:
-                th_area = 40.0 if self.status == "STATE_U" else 50.0 
+                limite_tiempo = 40.0 if self.mode == "TURN_180" else 50.0 
                 
-                if t_area > th_area:
-                    self.halt()
-                    self.evd_x = self.curr_x
-                    self.evd_y = self.curr_y
+                if tiempo_en_zona > limite_tiempo:
+                    self.stop()
+                    self.escape_start_x = self.pos_x
+                    self.escape_start_y = self.pos_y
                     
-                    if self.flag_reverse:
-                        self.flag_reverse = False
-                        self.is_reversing = True
+                    if self.backtrack_after_turn:
+                        self.backtrack_after_turn = False
+                        self.returning_to_parent = True
                     
-                    self.evd_lin = -1.0 
-                    if min_l < min_r:
-                        self.evd_ang = -0.08 
+                    self.escape_dir_linear = -1.0 
+                    if lmin < rmin:
+                        self.escape_dir_angular = -0.08 
                     else:
-                        self.evd_ang = 0.08
+                        self.escape_dir_angular = 0.08
                         
-                    self.status = "STATE_FREE"
+                    self.mode = "ESCAPING"
                     
-                    self.jam_x = self.curr_x
-                    self.jam_y = self.curr_y
-                    self.jam_time = self.get_clock().now()
+                    self.stuck_ref_x = self.pos_x
+                    self.stuck_ref_y = self.pos_y
+                    self.stuck_timer_start = self.get_clock().now()
                     return
 
-        if self.status == "STATE_APPROACH":
-            if min_l < min_r and min_l < 0.40:
-                off_v = min_l - 0.155
-            elif min_r < 0.40:
-                off_v = 0.155 - min_r
+        if self.mode == "APPROACHING_INTERSECTION":
+            if lmin < rmin and lmin < 0.40:
+                err = lmin - 0.155
+            elif rmin < 0.40:
+                err = 0.155 - rmin
             else:
-                off_v = 0.0
+                err = 0.0
                 
-            w_mod = self.constrain(off_v * 3.5, -0.40, 0.40)
-            f_zero = self.get_min(0, 10)
-            prg = calc_hypot(self.curr_x, self.curr_y, self.chk_x, self.chk_y)
+            ac = self.clamp(err * 3.5, -0.40, 0.40)
+            grado_cero = self.smin(0, 10)
+            adv = dist2d(self.pos_x, self.pos_y, self.verify_start_x, self.verify_start_y)
 
-            if prg < 0.04 and f_zero > 0.18:
-                self.push_vel(self.vel_slow, w_mod); return
+            if adv < 0.04 and grado_cero > 0.18:
+                self.cmd(self.SLOW_SPEED, ac); return
 
-            self.halt()
-            self.status = "STATE_SCAN"
+            self.stop()
+            self.mode = "ANALYZING_NODE"
             return
 
-        if self.status == "STATE_SCAN":
-            f_clear = self.get_mean(0, 15) > 0.29
-            l_clear = self.get_mean(90, 15) > 0.35 or self.get_mean(45, 30) > 0.45
-            r_clear = self.get_mean(270, 15) > 0.35 or self.get_mean(315, 30) > 0.45
+        if self.mode == "ANALYZING_NODE":
+            frente_abierto = self.savg(0, 15) > 0.29
+            izq_abierto = self.savg(90, 15) > 0.35 or self.savg(45, 30) > 0.45
+            der_abierto = self.savg(270, 15) > 0.35 or self.savg(315, 30) > 0.45
 
-            rel_opts = []
-            if f_clear: rel_opts.append(0.0)
-            if l_clear: rel_opts.append(self.rad_limit)
-            if r_clear: rel_opts.append(-self.rad_limit)
+            caminos_detectados_relativos = []
+            if frente_abierto: caminos_detectados_relativos.append(0.0)
+            if izq_abierto: caminos_detectados_relativos.append(self.TURN_ANGLE_RAD)
+            if der_abierto: caminos_detectados_relativos.append(-self.TURN_ANGLE_RAD)
 
-            abs_opts = [wrap_rads(self.curr_h + deg) for deg in rel_opts]
-            back_h = wrap_rads(self.curr_h + math.pi)
+            fp = [normalize_angle(self.yaw + ang) for ang in caminos_detectados_relativos]
+            cf = normalize_angle(self.yaw + math.pi)
 
-            if len(abs_opts) == 0:
-                v_l = max(self.get_mean(90, 20), self.get_mean(45, 20))
-                v_r = max(self.get_mean(270, 20), self.get_mean(315, 20))
+            if len(fp) == 0:
+                val_L = max(self.savg(90, 20), self.savg(45, 20))
+                val_R = max(self.savg(270, 20), self.savg(315, 20))
                 
-                if v_l > 0.30 and v_l > (v_r + 0.10):
-                    self.aim_h = wrap_rads(self.curr_h + self.rad_limit)
-                    self.status = "STATE_ROT"
-                elif v_r > 0.30 and v_r > (v_l + 0.10):
-                    self.aim_h = wrap_rads(self.curr_h - self.rad_limit)
-                    self.status = "STATE_ROT"
-                elif v_l > 0.30 and v_r > 0.45:
-                    self.aim_h = wrap_rads(self.curr_h + self.rad_limit) if v_l > v_r else wrap_rads(self.curr_h - self.rad_limit)
-                    self.status = "STATE_ROT"
+                if val_L > 0.30 and val_L > (val_R + 0.10):
+                    self.target_yaw = normalize_angle(self.yaw + self.TURN_ANGLE_RAD)
+                    self.mode = "EXECUTING_TURN"
+                elif val_R > 0.30 and val_R > (val_L + 0.10):
+                    self.target_yaw = normalize_angle(self.yaw - self.TURN_ANGLE_RAD)
+                    self.mode = "EXECUTING_TURN"
+                elif val_L > 0.30 and val_R > 0.45:
+                    self.target_yaw = normalize_angle(self.yaw + self.TURN_ANGLE_RAD) if val_L > val_R else normalize_angle(self.yaw - self.TURN_ANGLE_RAD)
+                    self.mode = "EXECUTING_TURN"
                 else:
-                    self.aim_h = wrap_rads(self.curr_h + math.pi)
-                    self.trigger_cd()
-                    self.status = "STATE_U"
+                    self.target_yaw = normalize_angle(self.yaw + math.pi)
+                    self.activate_cooldown()
+                    self.mode = "TURN_180"
                 return
 
-            if self.is_reversing:
-                is_parent = False
-                if self.active_idx:
-                    d_p = calc_hypot(self.curr_x, self.curr_y, self.active_idx['nx'], self.active_idx['ny'])
-                    if d_p < 0.25:
-                        is_parent = True
+            if self.returning_to_parent:
+                es_el_padre_real = False
+                if self.current_node:
+                    dist_al_padre = dist2d(self.pos_x, self.pos_y, self.current_node['x'], self.current_node['y'])
+                    if dist_al_padre < 0.25:
+                        es_el_padre_real = True
 
-                if self.active_idx is None or is_parent:
-                    self.is_reversing = False
-                    self.char_hist.append('B')
-                    self.reduce_hist()
+                if self.current_node is None or es_el_padre_real:
+                    self.returning_to_parent = False
+                    self.path_letters.append('B')
+                    self.simplify_path()
                     
-                    if self.active_idx and len(self.active_idx['open']) > 0:
-                        min_err = float('inf')
-                        opt_h = back_h
-                        opt_idx = -1
+                    if self.current_node and len(self.current_node['unexplored']) > 0:
+                        best_match_diff = float('inf')
+                        best_dir = cf
+                        best_unexp_idx = -1
                         
-                        for abs_h in abs_opts:
-                            for idx, u_h in enumerate(self.active_idx['open']):
-                                err = abs(calc_offset(abs_h, u_h))
-                                if err < min_err:
-                                    min_err = err
-                                    opt_h = abs_h
-                                    opt_idx = idx
+                        for current_dir in fp:
+                            for i, unexp_dir in enumerate(self.current_node['unexplored']):
+                                diff = abs(angle_diff(current_dir, unexp_dir))
+                                if diff < best_match_diff:
+                                    best_match_diff = diff
+                                    best_dir = current_dir
+                                    best_unexp_idx = i
                                     
-                        if min_err < 0.8: 
-                            self.active_idx['open'].pop(opt_idx)
+                        if best_match_diff < 0.8: 
+                            self.current_node['unexplored'].pop(best_unexp_idx)
                         else:
-                            opt_h = abs_opts[-1] if len(abs_opts) > 1 else abs_opts[0]
+                            best_dir = fp[-1] if len(fp) > 1 else fp[0]
                             
-                        self.aim_h = opt_h
-                        self.status = "STATE_ROT"
+                        self.target_yaw = best_dir
+                        self.mode = "EXECUTING_TURN"
                     else:
-                        self.node_net = []
-                        self.active_idx = None
-                        self.is_reversing = False
-                        self.char_hist = []
+                        self.topological_graph = []
+                        self.current_node = None
+                        self.returning_to_parent = False
+                        self.path_letters = []
                         
-                        opt_h, min_w = abs_opts[0], float('inf')
-                        for a in abs_opts:
-                            w = self.heat_map.get(self.get_grid(self.curr_x+0.35*math.cos(a), self.curr_y+0.35*math.sin(a)), 0)
-                            if w < min_w: min_w, opt_h = w, a
+                        best_dir, best_v = fp[0], float('inf')
+                        for d in fp:
+                            v = self.visited_cells.get(self.cell(self.pos_x+0.35*math.cos(d), self.pos_y+0.35*math.sin(d)), 0)
+                            if v < best_v: best_v, best_dir = v, d
                                 
-                        self.aim_h = opt_h
-                        self.status = "STATE_ROT"
+                        self.target_yaw = best_dir
+                        self.mode = "EXECUTING_TURN"
                 else:
-                    self.is_reversing = False
-                    back_ptr = self.curr_h
-                    self.eval_intersection(abs_opts, back_ptr)
+                    self.returning_to_parent = False
+                    cf_hacia_padre = self.yaw
+                    self.process_topological_node(fp, cf_hacia_padre)
                 return
 
-            if len(abs_opts) == 1:
-                if abs_opts[0] == 0.0:
-                    self.status = "STATE_DRIVE"
-                    self.trigger_cd()
+            if len(fp) == 1:
+                if fp[0] == 0.0:
+                    self.mode = "EXPLORING"
+                    self.activate_cooldown()
+                    self.cooldown_ticks = 20
                 else:
-                    self.aim_h = abs_opts[0]
-                    self.status = "STATE_ROT"
+                    self.target_yaw = fp[0]
+                    self.mode = "EXECUTING_TURN"
             else:
-                self.eval_intersection(abs_opts, back_h)
+                self.process_topological_node(fp, cf)
 
-        if self.status == "STATE_ROT":
-            if self.exec_rot(self.aim_h, self.spin_max):
-                self.status = "STATE_DRIVE"
-                self.trigger_cd()
-                self.inside_junc = True
+        if self.mode == "EXECUTING_TURN":
+            if self.execute_safe_turn(self.target_yaw, self.ANGULAR_SPEED):
+                self.mode = "EXPLORING"
+                self.activate_cooldown()
+                self.in_intersection_zone = True
             return
 
-        if self.status == "STATE_U":
-            if self.exec_rot(self.aim_h, self.spin_max * 0.8):
-                if self.flag_reverse:
-                    self.flag_reverse = False
-                    self.is_reversing = True
-                self.status = "STATE_DRIVE"
-                self.trigger_cd()
-                self.inside_junc = True
+        if self.mode == "TURN_180":
+            if self.execute_safe_turn(self.target_yaw, self.ANGULAR_SPEED * 0.8):
+                if self.backtrack_after_turn:
+                    self.backtrack_after_turn = False
+                    self.returning_to_parent = True
+                self.mode = "EXPLORING"
+                self.activate_cooldown()
+                self.in_intersection_zone = True
             return
 
-        if min_l < 0.30 and min_r < 0.30:
-            self.inside_junc = False
+        if lmin < 0.30 and rmin < 0.30:
+            self.in_intersection_zone = False
 
-        l_mov = self.get_mean(90, 20) > 0.35 or self.get_mean(45, 20) > 0.45
-        r_mov = self.get_mean(270, 20) > 0.35 or self.get_mean(315, 20) > 0.45
-        lat_sig = l_mov or r_mov
+        izq_abierto_mov = self.savg(90, 20) > 0.35 or self.savg(45, 20) > 0.45
+        der_abierto_mov = self.savg(270, 20) > 0.35 or self.savg(315, 20) > 0.45
+        has_lat = izq_abierto_mov or der_abierto_mov
 
-        if abs(self.prev_w) > 0.15: lat_sig = False
+        if abs(self.last_angular) > 0.15: has_lat = False
         
-        if self.cd_active:
-            cd_offset = calc_hypot(self.curr_x, self.curr_y, self.cd_origin_x, self.cd_origin_y)
-            if cd_offset >= self.cd_dist:
-                self.cd_active = False
-                self.inside_junc = False 
+        if self.detection_cooldown:
+            dist_desde_nodo = dist2d(self.pos_x, self.pos_y, self.cooldown_x, self.cooldown_y)
+            if dist_desde_nodo >= self.COOLDOWN_DISTANCE:
+                self.detection_cooldown = False
+                self.in_intersection_zone = False 
             else: 
-                lat_sig = False
-                self.inside_junc = True
+                has_lat = False
+                self.in_intersection_zone = True
                 
-                if min_fl < 0.20 or min_l < 0.16:
-                    defc = max(0.20 - min_fl, 0.16 - min_l)
-                elif min_fr < 0.20 or min_r < 0.16:
-                    defc = max(0.20 - min_fr, 0.16 - min_r)
+                if flmin < 0.20 or lmin < 0.16:
+                    deficit = max(0.20 - flmin, 0.16 - lmin)
+                elif frmin < 0.20 or rmin < 0.16:
+                    deficit = max(0.20 - frmin, 0.16 - rmin)
 
-        if lat_sig and not self.cd_active and not self.inside_junc:
-            self.halt()
-            self.status = "STATE_SCAN" 
-            self.chk_x, self.chk_y = self.curr_x, self.curr_y
-            self.inside_junc = True
+        if has_lat and not self.detection_cooldown and not self.in_intersection_zone:
+            self.stop()
+            self.mode = "ANALYZING_NODE" 
+            self.verify_start_x, self.verify_start_y = self.pos_x, self.pos_y
+            self.in_intersection_zone = True
             return
 
-        elif not self.cd_active and min_f <= self.wall_gap and lat_sig:
-            self.halt()
-            self.status = "STATE_SCAN"
-            self.chk_x, self.chk_y = self.curr_x, self.curr_y
-            self.inside_junc = True
+        elif not self.detection_cooldown and fmin <= self.WALL_STOP and has_lat:
+            self.stop()
+            self.mode = "ANALYZING_NODE"
+            self.verify_start_x, self.verify_start_y = self.pos_x, self.pos_y
+            self.in_intersection_zone = True
             return
 
-        s_back = self.get_mean(180, 24)
-        if min_f < 0.20 and min_l < 0.20 and min_r < 0.20 and s_back > 0.30:
-            esc = False
-            for dx in range(0, 360, 15):
-                if 140 <= dx <= 220: continue
-                if self.get_mean(dx, 14) > 0.30: esc = True; break
-            if not esc:
-                self.aim_h = wrap_rads(self.curr_h + math.pi)
-                self.flag_reverse = True
-                self.status = "STATE_U"; return
+        back_dist = self.savg(180, 24)
+        if fmin < 0.20 and lmin < 0.20 and rmin < 0.20 and back_dist > 0.30:
+            has_exit = False
+            for sd in range(0, 360, 15):
+                if 140 <= sd <= 220: continue
+                if self.savg(sd, 14) > 0.30: has_exit = True; break
+            if not has_exit:
+                self.target_yaw = normalize_angle(self.yaw + math.pi)
+                self.backtrack_after_turn = True
+                self.mode = "TURN_180"; return
 
-        if min_f < self.stop_th:
-            w_mod = 1.0 if min_l > min_r else -1.0
-            self.push_vel(0, w_mod * self.spin_max * 0.6); return
+        if fmin < self.FRONT_BRAKE:
+            td = 1.0 if lmin > rmin else -1.0
+            self.cmd(0, td * self.ANGULAR_SPEED * 0.6); return
 
-        trg = 0.155        
-        trg_d = 0.220   
-        viz_t = 0.32   
+        TARGET = 0.155        
+        TARGET_DIAG = 0.220   
+        WALL_VISIBLE = 0.32   
         
-        cmp_fl = min(min_fl, 0.26)
-        cmp_fr = min(min_fr, 0.26)
+        c_flmin = min(flmin, 0.26)
+        c_frmin = min(frmin, 0.26)
         
-        err_w = 0.0
+        error = 0.0
 
-        if min_l < viz_t and min_r < viz_t:
-            if min_l < min_r:
-                err_w = (min_l - trg) * 3.0 + (cmp_fl - trg_d) * 1.5
+        if lmin < WALL_VISIBLE and rmin < WALL_VISIBLE:
+            if lmin < rmin:
+                error = (lmin - TARGET) * 3.0 + (c_flmin - TARGET_DIAG) * 1.5
             else:
-                err_w = (trg - min_r) * 3.0 + (trg_d - cmp_fr) * 1.5
-        elif min_l < viz_t:
-            err_w = (min_l - trg) * 3.0 + (cmp_fl - trg_d) * 1.5
-        elif min_r < viz_t:
-            err_w = (trg - min_r) * 3.0 + (trg_d - cmp_fr) * 1.5
+                error = (TARGET - rmin) * 3.0 + (TARGET_DIAG - c_frmin) * 1.5
+        elif lmin < WALL_VISIBLE:
+            error = (lmin - TARGET) * 3.0 + (c_flmin - TARGET_DIAG) * 1.5
+        elif rmin < WALL_VISIBLE:
+            error = (TARGET - rmin) * 3.0 + (TARGET_DIAG - c_frmin) * 1.5
 
-        if min_l < 0.115 or min_fl < 0.13:
-            err_w = -0.6  
-        elif min_r < 0.115 or min_fr < 0.13:
-            err_w = 0.6   
+        if lmin < 0.115 or flmin < 0.13:
+            error = -0.6  
+        elif rmin < 0.115 or frmin < 0.13:
+            error = 0.6   
 
-        w_out = self.constrain(err_w, -0.45, 0.45)
+        angular = self.clamp(error, -0.45, 0.45)
         
-        v_out = self.vel_fwd
-        if min_f < self.slow_th or abs(w_out) > 0.20:
-            v_out = self.vel_slow
+        linear = self.LINEAR_SPEED
+        if fmin < self.FRONT_SLOW or abs(angular) > 0.20:
+            linear = self.SLOW_SPEED
 
-        self.push_vel(v_out, w_out)
+        self.cmd(linear, angular)
 
 def main(args=None):
     rclpy.init(args=args)
-    sys = CoreNavigator()
-    try: rclpy.spin(sys)
+    node = LaberintSolver()
+    try: rclpy.spin(node)
     except KeyboardInterrupt: pass
     finally:
-        if rclpy.ok(): sys.destroy_node(); rclpy.shutdown()
+        if rclpy.ok(): node.destroy_node(); rclpy.shutdown()
 
 if __name__ == '__main__':
     main()
