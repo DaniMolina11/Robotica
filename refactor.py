@@ -1,10 +1,5 @@
 #!/usr/bin/env python3
-"""
-Módulo de Navegación Autónoma para Laberintos
-- Gestión de trayectorias mediante grafo topológico.
-- Odometría y escaneo láser para evasión de obstáculos.
-- Sistema anti-bloqueo y máquina de estados finitos.
-"""
+
 import math
 from datetime import datetime
 from collections import defaultdict
@@ -16,8 +11,6 @@ from geometry_msgs.msg import Twist
 from sensor_msgs.msg import LaserScan
 from nav_msgs.msg import Odometry
 from std_msgs.msg import Bool
-
-# --- Funciones Auxiliares ---
 
 def extract_yaw_from_quat(q):
     y_val = 2.0 * (q.w * q.z + q.x * q.y)
@@ -33,19 +26,16 @@ def wrap_angle_rads(angle):
 def euclidean_dist(x_a, y_a, x_b, y_b):
     return math.sqrt((x_a - x_b)**2 + (y_a - y_b)**2)
 
-# --- Clase Principal ---
 
 class MazeNavigatorNode(Node):
     def __init__(self):
         super().__init__('maze_navigator')
         
-        # Archivo de registro
         stamp = datetime.now().strftime('%Y%m%d_%H%M%S')
         self.file_log = f"nav_record_{stamp}.txt"
         with open(self.file_log, 'w') as doc:
             doc.write("=== INICIO DE REGISTRO ===\n")
 
-        # --- Parámetros de Cinemática ---
         self.vel_fwd = 0.02
         self.vel_fwd_slow = 0.01
         self.vel_rot_max = 0.25
@@ -53,19 +43,16 @@ class MazeNavigatorNode(Node):
         self.dist_slow_front = 0.25
         self.filter_chassis_dist = 0.05
 
-        # --- Ajustes de Rotación ---
         self.dist_wall_stop = 0.20
         self.deg_turn = 55
         self.rad_turn = math.radians(self.deg_turn)
 
-        # --- Memoria de Evasión (Anti-Atasco) ---
         self.time_last_move = self.get_clock().now()
         self.evade_start_x = 0.0
         self.evade_start_y = 0.0
         self.evade_linear = -1.0
         self.evade_angular = 0.0
 
-        # --- Estado Global ---
         self.lidar_readings = None
         self.is_completed = False
         self.goal_achieved = False
@@ -75,19 +62,16 @@ class MazeNavigatorNode(Node):
         self.map_resolution = 0.30
         self.heat_map = defaultdict(int)
 
-        # --- Sistema Topológico ---
         self.node_network = []
         self.active_node = None
         self.reverting_path = False
         self.route_history = []
         self.gap_threshold = 0.40
 
-        # Máquina de estados
         self.nav_state = "STATE_NAVIGATE"
         self.desired_yaw = 0.0
         self.force_backtrack = False
 
-        # Tiempos de espera y zonas
         self.is_cooling_down = False
         self.cd_origin_x = 0.0
         self.cd_origin_y = 0.0
@@ -100,13 +84,11 @@ class MazeNavigatorNode(Node):
         self.ang_accel_limit = 0.12
         self.best_heading = 0.0
 
-        # Detección de atasco físico (Odometría)
         self.jam_ref_x = 0.0
         self.jam_ref_y = 0.0
         self.jam_timer = self.get_clock().now()
         self.jam_radius = 0.05
 
-        # --- Configuración ROS2 ---
         self.publisher_cmd = self.create_publisher(Twist, '/cmd_vel', 10)
         custom_qos = QoSProfile(
             reliability=ReliabilityPolicy.BEST_EFFORT,
@@ -120,7 +102,6 @@ class MazeNavigatorNode(Node):
         
         self.record_event("SISTEMA ARRANCADO. Configuración inicial cargada.")
 
-    # --- Herramientas de Registro y Control ---
     def record_event(self, msg, detail=""):
         if not self.lidar_readings: 
             return
@@ -140,7 +121,6 @@ class MazeNavigatorNode(Node):
         except Exception: 
             pass
 
-    # --- Callbacks ---
     def callback_lidar(self, msg):
         if not msg.ranges: 
             return
@@ -164,7 +144,6 @@ class MazeNavigatorNode(Node):
     def callback_goal(self, msg): 
         self.goal_achieved = bool(msg.data)
 
-    # --- Procesamiento Láser ---
     def fetch_slice(self, angle_deg, size=10):
         if not self.lidar_readings: 
             return []
@@ -198,7 +177,6 @@ class MazeNavigatorNode(Node):
         return (self.get_min(90, 24), self.get_min(270, 24), 
                 self.get_min(45, 18), self.get_min(315, 18))
 
-    # --- Acciones Físicas ---
     def send_vel(self, v_lin, v_ang):
         t = Twist()
         t.linear.x = float(v_lin)
@@ -233,7 +211,6 @@ class MazeNavigatorNode(Node):
         self.send_vel(0, final_spin)
         return False
 
-    # --- Topología y Grafos ---
     def register_turn_char(self, target_a):
         deg_diff = math.degrees(calc_angle_diff(target_a, self.curr_yaw))
         if deg_diff > 45: char = 'L'
@@ -272,7 +249,6 @@ class MazeNavigatorNode(Node):
                 self.node_network.append(new_node)
                 self.active_node = new_node
         else:
-            # Buscar nodos cercanos para fusionar
             merge_thresh = 0.15
             found_node = None
             for n in self.node_network:
@@ -300,7 +276,6 @@ class MazeNavigatorNode(Node):
             self.reverting_path = False
             self.route_history.clear()
             
-            # Buscar la ruta menos saturada físicamente
             opt_dir, min_visits = available_paths[0], float('inf')
             for p_dir in available_paths:
                 cx = self.curr_x + 0.35 * math.cos(p_dir)
@@ -313,7 +288,6 @@ class MazeNavigatorNode(Node):
             self.nav_state = "STATE_ROTATE"
             return
 
-        # Comprobar vigencia de caminos
         valid_dirs = []
         for pd in self.active_node['pending']:
             if abs(calc_angle_diff(pd, origin_path)) < 0.5:
@@ -367,7 +341,6 @@ class MazeNavigatorNode(Node):
         turn_deg = math.degrees(calc_angle_diff(opt_dir, self.curr_yaw))
         self.record_event(f"Resolución de Nodo: Viraje de {turn_deg:.0f}°")
 
-    # --- Bucle de Control Principal ---
     def routine_update(self):
         if not self.lidar_readings or self.is_completed: 
             return
@@ -381,7 +354,6 @@ class MazeNavigatorNode(Node):
         f_min, f_avg = self.eval_front()
         l_min, r_min, fl_min, fr_min = self.eval_sides()
 
-        # --- FASE 0: MANIOBRAS DE ESCAPE ---
         if self.nav_state == "STATE_UNSTUCK":
             dist_escaped = euclidean_dist(self.curr_x, self.curr_y, self.evade_start_x, self.evade_start_y)
             if dist_escaped >= 0.08:
@@ -404,7 +376,6 @@ class MazeNavigatorNode(Node):
             self.send_vel(self.vel_fwd_slow * self.evade_linear, self.evade_angular)
             return
 
-        # Comprobación de seguridad temporal
         is_turning = self.nav_state in ["STATE_ROTATE", "STATE_U_TURN"]
         if is_turning or f_min < self.dist_brake_front:
             time_stuck = (self.get_clock().now() - self.time_last_move).nanoseconds / 1e9
@@ -429,7 +400,6 @@ class MazeNavigatorNode(Node):
         else:
             self.time_last_move = self.get_clock().now()
 
-        # Comprobación de seguridad espacial (Odometría)
         if self.nav_state != "STATE_UNSTUCK":
             spatial_dist = euclidean_dist(self.curr_x, self.curr_y, self.jam_ref_x, self.jam_ref_y)
             spatial_time = (self.get_clock().now() - self.jam_timer).nanoseconds / 1e9
@@ -460,7 +430,6 @@ class MazeNavigatorNode(Node):
                     self.jam_timer = self.get_clock().now()
                     return
 
-        # --- FASE 1: APROXIMACIÓN A INTERSECCIÓN ---
         if self.nav_state == "STATE_APPROACH_JUNCTION":
             shift_err = 0.0
             if l_min < r_min and l_min < 0.40: shift_err = l_min - 0.155
@@ -480,7 +449,6 @@ class MazeNavigatorNode(Node):
             self.record_event(f"Posicionado para escanear (Frente libre: {front_gap:.2f}m).")
             return
 
-        # --- FASE 2: EVALUACIÓN DE NODO ---
         if self.nav_state == "STATE_EVALUATE_JUNCTION":
             
             gap_fwd = self.get_mean(0, 15) > 0.29
@@ -495,14 +463,12 @@ class MazeNavigatorNode(Node):
             abs_paths = [wrap_angle_rads(self.curr_yaw + r) for r in rel_paths]
             backward_path = wrap_angle_rads(self.curr_yaw + math.pi)
 
-            # Detección de origen
             is_parent = False
             if self.reverting_path and self.active_node is not None:
                 dist_parent = euclidean_dist(self.curr_x, self.curr_y, self.active_node['px'], self.active_node['py'])
                 if dist_parent < 0.45:
                     is_parent = True
 
-            # Procesamiento de cruce
             if len(abs_paths) == 0:
                 val_izq = max(self.get_mean(90, 20), self.get_mean(45, 20))
                 val_der = max(self.get_mean(270, 20), self.get_mean(315, 20))
@@ -626,7 +592,6 @@ class MazeNavigatorNode(Node):
                         self.trigger_cooldown()
                         return
 
-        # --- FASE 3: ROTACIÓN DE PRECISIÓN ---
         if self.nav_state == "STATE_ROTATE":
             if self.perform_rotation(self.desired_yaw, self.vel_rot_max):
                 self.nav_state = "STATE_NAVIGATE"
@@ -635,7 +600,6 @@ class MazeNavigatorNode(Node):
                 self.record_event("Viraje finalizado correctamente.")
             return
 
-        # --- FASE 4: MEDIA VUELTA ---
         if self.nav_state == "STATE_U_TURN":
             if self.perform_rotation(self.desired_yaw, self.vel_rot_max * 0.8):
                 if self.force_backtrack:
@@ -647,7 +611,6 @@ class MazeNavigatorNode(Node):
                 self.inside_junction = True
             return
 
-        # --- FASE 5: SEGUIMIENTO DE PAREDES (Navegación general) ---
         if l_min < 0.30 and r_min < 0.30:
             self.inside_junction = False
 
@@ -658,7 +621,6 @@ class MazeNavigatorNode(Node):
         if abs(self.prev_angular_vel) > 0.15: 
             wall_breach = False
         
-        # Gestor de Cooldown basado en proximidad
         if self.is_cooling_down:
             dist_to_origin = euclidean_dist(self.curr_x, self.curr_y, self.cd_origin_x, self.cd_origin_y)
             
@@ -678,7 +640,6 @@ class MazeNavigatorNode(Node):
                         self.send_vel(self.vel_fwd, max(0.20 - fr_min, 0.16 - r_min) * 4.0)
                         return
 
-        # Trigger de brecha lateral
         if wall_breach and not self.is_cooling_down and not self.inside_junction and f_min > 0.60:
             self.halt_robot()
             self.nav_state = "STATE_EVALUATE_JUNCTION" 
@@ -687,7 +648,6 @@ class MazeNavigatorNode(Node):
             self.record_event("Corte en pared detectado. Parada táctica.")
             return
 
-        # Trigger de pared frontal
         elif not self.is_cooling_down and f_min <= self.dist_wall_stop and wall_breach:
             self.halt_robot()
             self.nav_state = "STATE_EVALUATE_JUNCTION"
@@ -696,7 +656,6 @@ class MazeNavigatorNode(Node):
             self.record_event(f"Obstáculo inminente a {f_min:.2f}m. Iniciando análisis.")
             return
 
-        # Evaluación de pasadizos ciegos
         space_rear = self.get_mean(180, 24)
         if f_min < 0.20 and l_min < 0.20 and r_min < 0.20 and space_rear > 0.30:
             escape_route = False
@@ -712,13 +671,11 @@ class MazeNavigatorNode(Node):
                 self.nav_state = "STATE_U_TURN"
                 return
 
-        # Frenada de emergencia
         if f_min < self.dist_brake_front:
             rot_mod = 1.0 if l_min > r_min else -1.0
             self.send_vel(0, rot_mod * self.vel_rot_max * 0.6)
             return
 
-        # --- Control PID/PD de Centrado de Pasillo ---
         offset_target = 0.155        
         offset_diag = 0.220   
         viz_limit = 0.32   
@@ -738,7 +695,6 @@ class MazeNavigatorNode(Node):
         elif r_min < viz_limit:
             correction_factor = (offset_target - r_min) * 3.0 + (offset_diag - cap_fr) * 1.5
 
-        # Parches de seguridad
         if l_min < 0.115 or fl_min < 0.13:
             correction_factor = -0.6  
         elif r_min < 0.115 or fr_min < 0.13:
