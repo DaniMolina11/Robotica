@@ -64,7 +64,7 @@ class LaberintSolver(Node):
         self.current_node = None
         self.returning_to_parent = False
         self.path_letters = []
-        self.INTERSECT_OPEN_THRESHOLD = 0.35  
+        self.INTERSECT_OPEN_THRESHOLD = 0.35 
 
         self.mode = "EXPLORING"
         self.target_yaw = 0.0
@@ -465,12 +465,12 @@ class LaberintSolver(Node):
                         
                         for current_dir in fp:
                             for i, unexp_dir in enumerate(self.current_node['unexplored']):
-                                diff = abs(angle_diff(current_dir, unexp_dir))
-                                if diff < best_match_diff:
-                                    best_match_diff = diff
-                                    best_dir = current_dir
-                                    best_unexp_idx = i
-                                    
+                                    diff = abs(angle_diff(current_dir, unexp_dir))
+                                    if diff < best_match_diff:
+                                        best_match_diff = diff
+                                        best_dir = current_dir
+                                        best_unexp_idx = i
+                                        
                         if best_match_diff < 0.8: 
                             self.current_node['unexplored'].pop(best_unexp_idx)
                             self.log_event("Memoria topológica: Ruta inexplorada recuperada con éxito.")
@@ -542,7 +542,7 @@ class LaberintSolver(Node):
         has_lat = izq_abierto_mov or der_abierto_mov
 
         if abs(self.last_angular) > 0.15: has_lat = False
-
+        
         if self.detection_cooldown:
             dist_desde_nodo = dist2d(self.pos_x, self.pos_y, self.cooldown_x, self.cooldown_y)
             if dist_desde_nodo >= self.COOLDOWN_DISTANCE:
