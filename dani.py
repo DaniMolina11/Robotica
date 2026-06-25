@@ -15,8 +15,8 @@ DIST_PARAR_GIRO        = 0.24   # Umbral frontal para actuar
 UMBRAL_ABIERTO         = 0.30   # Si el canal de apertura supera esto, el pasillo se ha abierto
 
 # VELOCIDADES AGRESIVAS A 50 HZ
-VEL_LINEAR_PASILLO    = 0.04   
-VEL_LINEAR_NORMAL     = 0.04   
+VEL_LINEAR_PASILLO    = 0.08   
+VEL_LINEAR_NORMAL     = 0.10   
 VEL_AVANCE_GIRO       = 0.04   
 VEL_GIRO              = 0.65   
 
