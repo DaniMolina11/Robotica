@@ -1,392 +1,761 @@
 #!/usr/bin/env python3
-
+"""
+Laberint Solver — Versión Corregida
+- Pasillos: locomoción ORIGINAL (choose_best_angle + pánico diagonal)
+- Giros: parar a 17cm de pared frontal, girar 68°
+- Detección: mejorada (barrido lateral, cooldown, nodos con posición)
+"""
+import math
+from datetime import datetime
+from collections import defaultdict
 import rclpy
 from rclpy.node import Node
+from rclpy.qos import QoSProfile, ReliabilityPolicy, HistoryPolicy
 from geometry_msgs.msg import Twist
 from sensor_msgs.msg import LaserScan
 from nav_msgs.msg import Odometry
-import math
-import time
-from collections import deque
+from std_msgs.msg import Bool
 
-# --- PARÁMETROS DE TU CÓDIGO ORIGINAL ---
-DIST_GIRO_PASILLO      = 0.22   
-DIST_PARAR_GIRO        = 0.18   # Apura hasta el fondo para liberar el morro
-DIST_FRENAR            = 0.42   
-DIST_PARED_DERECHA     = 0.25   
-DIST_PASILLO           = 0.45   
-DIST_ESQUINA_CERRADA   = 0.14   
-DIST_SEGURIDAD_TRASERA = 0.16   
+def quaternion_to_yaw(q):
+    siny_cosp = 2.0 * (q.w * q.z + q.x * q.y)
+    cosy_cosp = 1.0 - 2.0 * (q.y * q.y + q.z * q.z)
+    return math.atan2(siny_cosp, cosy_cosp)
 
-VEL_LINEAR_PASILLO    = 0.06
-VEL_LINEAR_NORMAL     = 0.08
-VEL_RETROCESO         = 0.05
-VEL_GIRO              = 0.35   # Un pelo más rápido para giros más limpios
-KP                    = 1.2
+def angle_diff(a, b):
+    return math.atan2(math.sin(a - b), math.cos(a - b))
 
-TIEMPO_GIRO_MINIMO    = 1.5
-N_LECTURAS_PROMEDIO   = 5
-TICKS_CONFIRMACION    = 4
+def normalize_angle(a):
+    return math.atan2(math.sin(a), math.cos(a))
 
-LOG_FILE = '/home/ros/Escriptori/Robotica/maze_log.txt'
+def dist2d(x1, y1, x2, y2):
+    return math.sqrt((x1 - x2)**2 + (y1 - y2)**2)
 
-class MazeSolver(Node):
+class LaberintSolver(Node):
     def __init__(self):
-        super().__init__('maze_solver_node')
-
-        self.cmd_pub  = self.create_publisher(Twist, '/cmd_vel', 10)
-        self.scan_sub = self.create_subscription(LaserScan, '/scan', self.scan_callback, 10)
-        self.odom_sub = self.create_subscription(Odometry,  '/odom', self.odom_callback, 10)
-        self.timer    = self.create_timer(0.1, self.control_loop)
-
-        self.buf_front    = deque(maxlen=N_LECTURAS_PROMEDIO)
-        self.buf_right    = deque(maxlen=N_LECTURAS_PROMEDIO)
-        self.buf_left     = deque(maxlen=N_LECTURAS_PROMEDIO)
-        self.buf_back     = deque(maxlen=N_LECTURAS_PROMEDIO)
-        self.buf_diag_izq = deque(maxlen=N_LECTURAS_PROMEDIO)
-        self.buf_diag_der = deque(maxlen=N_LECTURAS_PROMEDIO)
-
-        self.d_front    = 3.0
-        self.d_right    = 3.0
-        self.d_left     = 3.0
-        self.d_back     = 3.0
-        self.d_diag_izq = 3.0
-        self.d_diag_der = 3.0
-
-        # NUEVO: Lectura instantánea frontal sin retardos para clavar el ángulo de salida
-        self.d_front_raw = 3.0
-
-        self.pos_x = 0.0
-        self.pos_y = 0.0
-        self.yaw   = 0.0  
-        self.lecturas_acumuladas = 0
-
-        self.estado          = 'esperando'
-        self.estado_anterior = 'esperando'
-
-        self.tiempo_inicio_giro      = 0.0
-        self.giro_comprometido       = False
-        self.ticks_fuera_pasillo     = 0
-
-        # Memoria de coordenadas anti-bucles
-        self.path_history           = []  
-        self.punto_inicio_retroceso = None 
-        self.callejones_visitados   = []  
-
-        self.META_X               = 2.75
-        self.META_Y               = 1.71
-        self.DISTANCIA_MINIMA_META = 0.25
-        self.meta_alcanzada       = False
-
-        self.sim_time    = 0.0
-        self.vel_lin_pub = 0.0
-        self.vel_ang_pub = 0.0
-
-        self.log_file = open(LOG_FILE, 'w')
-        self._log_raw('=== INICIO SESION MAZE SOLVER ESTABILIZADO ===')
-
-    def _log_raw(self, msg):
-        ts = time.strftime('%H:%M:%S')
-        self.log_file.write(f'[{ts}] {msg}\n')
-        self.log_file.flush()
-
-    def _log_tick(self, evento=''):
-        self._log_raw(
-            f'{self.sim_time:9.2f} | {self.pos_x:+6.3f} | {self.pos_y:+6.3f} | '
-            f'{self.estado:<13}| '
-            f'{self.d_front:5.2f} | {self.d_right:5.2f} | {self.d_left:5.2f} | '
-            f'{self.vel_lin_pub:+7.3f} | {self.vel_ang_pub:+7.3f} | {evento}'
-        )
-
-    def _log_evento(self, msg):
-        self._log_raw(f'*** {msg} | estado={self.estado} pos=({self.pos_x:.2f},{self.pos_y:.2f}) F={self.d_front:.2f}')
-
-    def clean(self, v):
-        return 3.0 if (math.isinf(v) or math.isnan(v)) else float(v)
-
-    def sector_min(self, ranges, a, b):
-        return min(self.clean(ranges[i]) for i in range(a, b))
-
-    def promedio(self, buf):
-        return sum(buf) / len(buf) if buf else 3.0
-
-    def reset_filtros(self):
-        self.buf_front.clear()
-        self.buf_right.clear()
-        self.buf_left.clear()
-        self.buf_back.clear()
-        self.buf_diag_izq.clear()
-        self.buf_diag_der.clear()
-        self.lecturas_acumuladas = 0
-
-    def velocidad_frenada(self, d_front, vel_max):
-        if d_front >= DIST_FRENAR:
-            return vel_max
-        if d_front <= DIST_PARAR_GIRO:
-            return 0.0
-        ratio = (d_front - DIST_PARAR_GIRO) / (DIST_FRENAR - DIST_PARAR_GIRO)
-        return round(vel_max * ratio, 3)
-
-    def scan_callback(self, msg):
-        r = msg.ranges
-        if len(r) < 360:
-            return
-            
-        # NUEVO: Captura instantánea en tiempo real (Haz cerrado de 4° de frente)
-        self.d_front_raw = min(self.sector_min(r, 358, 360), self.sector_min(r, 0, 2))
-
-        self.buf_front.append(min(self.sector_min(r, 351, 360), self.sector_min(r, 0, 9)))
-        self.buf_right.append(   self.sector_min(r, 265, 295)) 
-        self.buf_left.append(    self.sector_min(r,  65, 115)) 
-        self.buf_back.append(    self.sector_min(r, 175, 185)) 
-        self.buf_diag_izq.append(self.sector_min(r,  35,  55))
-        self.buf_diag_der.append(self.sector_min(r, 305, 325))
-        self.lecturas_acumuladas += 1
+        super().__init__('laberint_solver')
         
-        self.d_front    = self.promedio(self.buf_front)
-        self.d_right    = self.promedio(self.buf_right)
-        self.d_left     = self.promedio(self.buf_left)
-        self.d_back     = self.promedio(self.buf_back)
-        self.d_diag_izq = self.promedio(self.buf_diag_izq)
-        self.d_diag_der = self.promedio(self.buf_diag_der)
-        self.sim_time   = msg.header.stamp.sec + msg.header.stamp.nanosec * 1e-9
+        self.log_filename = f"turtlebot_log_{datetime.now().strftime('%Y%m%d_%H%M%S')}.txt"
+        with open(self.log_filename, 'w') as f:
+            f.write("=== LOG ===\n")
 
-    def odom_callback(self, msg):
+        # ═══ Velocidades ORIGINALES (probadas en pasillos de 30cm) ═══
+        self.LINEAR_SPEED = 0.02
+        self.SLOW_SPEED = 0.01
+        self.MIN_SPEED = 0.0
+        self.ANGULAR_SPEED = 0.25
+        self.FRONT_BRAKE = 0.12
+        self.FRONT_SLOW = 0.25
+        self.SIDE_PANIC = 0.12
+        self.DIAG_PANIC = 0.14
+        self.CHASSIS_FILTER = 0.05
+
+        # ═══ Parámetros de giro ═══
+        self.WALL_STOP = 0.20
+        self.TURN_ANGLE = 55
+        self.TURN_ANGLE_RAD = math.radians(self.TURN_ANGLE)
+
+        # Variables para la maniobra de escape en atascos
+        self.last_movement_time = self.get_clock().now()
+        self.escape_start_x = 0.0
+        self.escape_start_y = 0.0
+        self.escape_dir_linear = -1.0
+        self.escape_dir_angular = 0.0
+
+        # Estado
+        self.scan_data = None
+        self.finished = False
+        self.meta_reached = False
+        self.pos_x = self.pos_y = self.yaw = 0.0
+        self.grid_res = 0.30
+        self.visited_cells = defaultdict(int)
+
+        # Grafo topológico
+        self.topological_graph = []
+        self.current_node = None
+        self.returning_to_parent = False
+        self.path_letters = []
+        self.INTERSECT_OPEN_THRESHOLD = 0.40
+
+        # Máquina de estados
+        self.mode = "EXPLORING"
+        self.target_yaw = 0.0
+        self.backtrack_after_turn = False
+
+        # Cooldown y memoria
+        self.detection_cooldown = False
+        self.cooldown_x = self.cooldown_y = 0.0
+        self.COOLDOWN_DISTANCE = 0.10
+        self.in_intersection_zone = False
+        self.verify_start_x = self.verify_start_y = 0.0
+
+        self.last_angular = 0.0
+        self.max_ang_step = 0.12
+        self.last_best_angle = 0.0
+
+        # Variables restauradas del detector de atasco por Odometría
+        self.stuck_ref_x = 0.0
+        self.stuck_ref_y = 0.0
+        self.stuck_timer_start = self.get_clock().now()
+        self.STUCK_RADIUS = 0.05
+
+        # ROS
+        self.cmd_pub = self.create_publisher(Twist, '/cmd_vel', 10)
+        qos = QoSProfile(reliability=ReliabilityPolicy.BEST_EFFORT,
+                         history=HistoryPolicy.KEEP_LAST, depth=10)
+        self.create_subscription(LaserScan, '/scan', self.scan_cb, qos)
+        self.create_subscription(Odometry, '/odom', self.odom_cb, qos)
+        self.create_subscription(Bool, '/meta', self.meta_cb, 10)
+        self.create_timer(0.1, self.control_loop)
+        self.log_event("ROBOT INICIADO. Giro 68 grados + locomoción original.")
+
+    # ═══ UTILIDADES ═══
+    def log_event(self, event, extra=""):
+        if not self.scan_data: return
+        F,FL,L = self.savg(0),self.savg(45),self.savg(90)
+        R,FR,B = self.savg(270),self.savg(315),self.savg(180)
+        ts = datetime.now().strftime('%H:%M:%S.%f')[:-3]
+        line = f"[{ts}] {event.ljust(45)} | F:{F:.2f} FL:{FL:.2f} L:{L:.2f} R:{R:.2f} FR:{FR:.2f} B:{B:.2f}"
+        if extra: line += f" | {extra}"
+        self.get_logger().info(line)
+        try:
+            with open(self.log_filename,'a') as f: f.write(line+"\n")
+        except: pass
+
+    # CAMBIO 4: scan_data clamped to 2.0 instead of 3.0
+    def scan_cb(self, msg):
+        if not msg.ranges: return
+        self.scan_data = [float('inf') if (r is None or math.isnan(r) or math.isinf(r) or r<=0 or r<self.CHASSIS_FILTER) else min(r,2.0) for r in msg.ranges]
+
+    def odom_cb(self, msg):
         self.pos_x = msg.pose.pose.position.x
         self.pos_y = msg.pose.pose.position.y
-        
-        q = msg.pose.pose.orientation
-        siny_cosp = 2.0 * (q.w * q.z + q.x * q.y)
-        cosy_cosp = 1.0 - 2.0 * (q.y * q.y + q.z * q.z)
-        self.yaw = math.atan2(siny_cosp, cosy_cosp)
+        self.yaw = quaternion_to_yaw(msg.pose.pose.orientation)
+        self.visited_cells[self.cell(self.pos_x, self.pos_y)] += 1
 
-        dist = math.sqrt((self.pos_x - self.META_X)**2 + (self.pos_y - self.META_Y)**2)
-        if dist < self.DISTANCIA_MINIMA_META and not self.meta_alcanzada:
-            self.meta_alcanzada = True
+    def meta_cb(self, msg): self.meta_reached = bool(msg.data)
 
-    def _camino_conduce_a_callejon(self, lado):
-        angulo = self.yaw + (math.pi/2.0 if lado == 'izq' else -math.pi/2.0)
-        px = self.pos_x + 0.55 * math.cos(angulo)
-        py = self.pos_y + 0.55 * math.sin(angulo)
-        for cx, cy in self.callejones_visitados:
-            if math.sqrt((px - cx)**2 + (py - cy)**2) < 0.45:
-                return True
+    # CAMBIO 4: svals clamped to 2.0 instead of 2.5
+    def svals(self, ca, w=10):
+        if not self.scan_data: return []
+        n=len(self.scan_data); ca=int(ca)%n; h=w//2
+        return [min(self.scan_data[(ca+o)%n],2.0) for o in range(-h,h+1) if self.scan_data[(ca+o)%n]>0.01 and not math.isinf(self.scan_data[(ca+o)%n])]
+    def savg(self, ca, w=10):
+        v=self.svals(ca,w); return sum(v)/len(v) if v else 2.0
+    def smin(self, ca, w=10):
+        v=self.svals(ca,w); return min(v) if v else 2.0
+    def front_metrics(self):
+        return min(self.smin(0,20),self.smin(10,14),self.smin(350,14)), self.savg(0,28)
+    def side_metrics(self):
+        return self.smin(90,24),self.smin(270,24),self.smin(45,18),self.smin(315,18)
+    def cmd(self, l, a):
+        m=Twist(); m.linear.x,m.angular.z=float(l),float(a); self.cmd_pub.publish(m)
+    def stop(self): self.cmd(0,0)
+    def clamp(self, v, lo, hi): return max(lo,min(hi,v))
+    def cell(self, x, y): return (round(x/self.grid_res),round(y/self.grid_res))
+    def smooth_ang(self, t):
+        self.last_angular=self.clamp(self.last_angular+self.clamp(t-self.last_angular,-self.max_ang_step,self.max_ang_step),-self.ANGULAR_SPEED,self.ANGULAR_SPEED)
+        return self.last_angular
+    def activate_cooldown(self):
+        self.detection_cooldown = True
+        self.cooldown_ticks = 30
+        self.cooldown_x = self.pos_x
+        self.cooldown_y = self.pos_y
+
+    # ═══ DETECCIÓN MEJORADA ═══
+    def get_open_directions(self):
+        dirs = []
+        for a in [0, 180]:
+            v = self.svals(a, 24)
+            if v and sum(v)/len(v) >= self.INTERSECT_OPEN_THRESHOLD:
+                dirs.append(normalize_angle(self.yaw + math.radians(a)))
+        for sc in [90, 270]:
+            bd = 0.0
+            for off in [-10, 0, 10]:
+                v = self.svals(sc+off, 14)
+                if v:
+                    d = sum(v)/len(v)
+                    if d > bd: bd = d
+            if bd >= self.INTERSECT_OPEN_THRESHOLD:
+                turn = self.TURN_ANGLE_RAD if sc == 90 else -self.TURN_ANGLE_RAD
+                dirs.append(normalize_angle(self.yaw + turn))
+        return dirs
+
+    # ═══ GIRO: rotación pura, frena al acercarse ═══
+    def execute_safe_turn(self, target_yaw, angular_speed):
+        diff = angle_diff(target_yaw, self.yaw)
+        if abs(diff) < 0.05:
+            self.cmd(0, 0); return True
+        speed = min(abs(diff) * 1.5, angular_speed)
+        if speed < 0.08: speed = 0.08
+        self.cmd(0, speed if diff > 0 else -speed)
         return False
 
-    def _cambiar_estado(self, nuevo, motivo=''):
-        if nuevo != self.estado:
-            self._log_evento(f'ESTADO {self.estado} -> {nuevo}  [{motivo}]')
-            self.estado_anterior = self.estado
-            self.estado = nuevo
+    # ═══ GRAFO TOPOLÓGICO ═══
+    def log_turn_letter(self, ta):
+        d=math.degrees(angle_diff(ta,self.yaw))
+        self.path_letters.append('L' if d>45 else 'R' if d<-45 else 'S')
+    def simplify_path(self):
+        changed=True
+        while changed and len(self.path_letters)>=3:
+            changed=False; seq="".join(self.path_letters[-3:])
+            reps={"LBL":"S","RBR":"S","LBS":"R","RBS":"L","SBL":"R","SBR":"L","LBR":"B","RBL":"B","SBS":"B"}
+            if seq in reps:
+                self.path_letters=self.path_letters[:-3]+list(reps[seq])
+                self.log_event(f"SIMPLIFICACIÓN: {seq} -> {reps[seq]}"); changed=True
 
-    def _decidir_lado_giro(self):
-        en_pasillo = (self.d_right < DIST_PASILLO and self.d_left < DIST_PASILLO)
-        if en_pasillo:
-            lado = 'izq' if self.d_diag_izq >= self.d_diag_der else 'der'
+    def process_topological_node(self, paths, came_from):
+        if self.returning_to_parent:
+            self.log_event("Regreso a Nodo Padre Completado")
+            self.returning_to_parent=False
+            self.path_letters.append('B'); self.simplify_path()
+            node=self.current_node
+            if node is None:
+                self.log_event("Creando Nodo Raíz.")
+                node={'id':len(self.topological_graph),'unexplored':paths.copy(),'parent':None,
+                      'came_from':came_from,'going_to':None,'x':self.pos_x,'y':self.pos_y}
+                self.topological_graph.append(node); self.current_node=node
         else:
-            lado = 'izq' if self.d_left >= self.d_right else 'der'
+            # ── DEDUPLICACIÓN: ¿Ya existe un nodo en esta posición? ──
+            NODE_MERGE_DIST = 0.15
+            existing_node = None
+            for n in self.topological_graph:
+                if dist2d(self.pos_x, self.pos_y, n['x'], n['y']) < NODE_MERGE_DIST:
+                    existing_node = n
+                    break
+
+            if existing_node:
+                node = existing_node
+                self.current_node = node
+                self.log_event(f"NODO #{node['id']} re-visitado ({len(node['unexplored'])} pendientes)")
+            else:
+                node={'id':len(self.topological_graph),'unexplored':paths.copy(),'parent':self.current_node,
+                      'came_from':came_from,'going_to':None,'x':self.pos_x,'y':self.pos_y}
+                self.topological_graph.append(node); self.current_node=node
+                self.log_event(f"NODO #{node['id']} ({len(paths)} caminos)")
+
+        if not node['unexplored']:
+            self.log_event("Nodo Agotado. Reiniciando memoria como nuevo inicio.")
+            self.topological_graph = []
+            self.current_node = None
+            self.returning_to_parent = False
+            self.path_letters = []
             
-        if lado == 'izq' and self._camino_conduce_a_callejon('izq'):
-            lado = 'der'
-        elif lado == 'der' and self._camino_conduce_a_callejon('der'):
-            lado = 'izq'
-        return lado
+            # Elegimos el camino físico menos visitado para salir de este cruce
+            best_dir, best_v = paths[0], float('inf')
+            for d in paths:
+                v = self.visited_cells.get(self.cell(self.pos_x+0.35*math.cos(d), self.pos_y+0.35*math.sin(d)), 0)
+                if v < best_v: 
+                    best_v, best_dir = v, d
+                    
+            self.target_yaw = best_dir
+            self.mode = "EXECUTING_TURN"
+            return
 
-    def _iniciar_giro(self, ahora):
-        lado = self._decidir_lado_giro()
-        self._cambiar_estado(f'girar_{lado}', f'giro lado={lado}')
-        self.tiempo_inicio_giro = ahora
-        self.giro_comprometido  = True
+        # ── CAMBIO 1: Validar que las direcciones guardadas siguen abiertas ──
+        valid = []
+        for d in node['unexplored']:
+            if abs(angle_diff(d, came_from)) < 0.5:
+                continue
+            for p in paths:
+                if abs(angle_diff(d, p)) < 0.8:
+                    valid.append(d)
+                    break
+        
+        if not valid:
+            valid = [p for p in paths if abs(angle_diff(p, came_from)) > 0.5]
+        
+        if not valid:
+            self.log_event("Nodo Agotado (sin rutas válidas). Reiniciando memoria.")
+            self.topological_graph = []
+            self.current_node = None
+            self.returning_to_parent = False
+            self.path_letters = []
+            
+            # Salimos por el camino menos explorado
+            best_dir, best_v = paths[0], float('inf')
+            for d in paths:
+                v = self.visited_cells.get(self.cell(self.pos_x+0.35*math.cos(d), self.pos_y+0.35*math.sin(d)), 0)
+                if v < best_v: 
+                    best_v, best_dir = v, d
+                    
+            self.target_yaw = best_dir
+            self.mode = "EXECUTING_TURN"
+            return
 
+        best_dir,best_v,best_i=valid[0],float('inf'),0
+        for i,d in enumerate(valid):
+            v=self.visited_cells.get(self.cell(self.pos_x+0.35*math.cos(d),self.pos_y+0.35*math.sin(d)),0)
+            if v<best_v: best_v,best_dir,best_i=v,d,i
+        
+        for j, d in enumerate(node['unexplored']):
+            if abs(angle_diff(d, best_dir)) < 0.8:
+                node['unexplored'].pop(j)
+                break
+        
+        node['going_to']=best_dir
+        self.log_turn_letter(best_dir); self.simplify_path()
+        self.target_yaw=best_dir
+        self.mode="EXECUTING_TURN"
+        self.log_event(f"Decisión: Giro {math.degrees(angle_diff(best_dir,self.yaw)):.0f}°")
+
+    def novelty_score(self, rel_deg):
+        ty=self.yaw+math.radians(rel_deg); s=0.0
+        for d in (0.3,0.6,0.9):
+            v=self.visited_cells.get(self.cell(self.pos_x+d*math.cos(ty),self.pos_y+d*math.sin(ty)),0)
+            s+=1.6 if v==0 else 0.6 if v<3 else 0.0 if v<7 else -1.2
+        return s
+
+    def choose_best_angle(self):
+        bs,ba=-1e9,0
+        for a in range(-95,96,5):
+            ca=a%360; avg=self.savg(ca,14); mn=self.smin(ca,10); mw=self.smin(ca,24)
+            s=avg*1.8+mn*0.8+mw*1.8-abs(a)*0.015+self.novelty_score(a)
+            if mw<0.20:s-=6.0
+            elif mw<0.26:s-=3.0
+            if mn<0.16:s-=2.5
+            s-=abs(a-self.last_best_angle)*0.005
+            if s>bs:bs,ba=s,a
+        self.last_best_angle=ba; return ba,bs
+
+    # ═══════════════════════════════════════════
+    # BUCLE PRINCIPAL
+    # ═══════════════════════════════════════════
     def control_loop(self):
-        twist = Twist()
+        if not self.scan_data or self.finished: return
+        if self.meta_reached:
+            self.stop(); self.finished=True
+            self.log_event(f"¡META! Ruta: {''.join(self.path_letters)}"); return
 
-        if self.meta_alcanzada:
-            self.cmd_pub.publish(twist)
+        fmin, favg = self.front_metrics()
+        lmin, rmin, flmin, frmin = self.side_metrics()
+
+        # ── 0. ESTADO DE ESCAPE (ANTI-BLOQUEOS) ──
+        if self.mode == "ESCAPING":
+            adv_escape = dist2d(self.pos_x, self.pos_y, self.escape_start_x, self.escape_start_y)
+            if adv_escape >= 0.08:
+                self.stop()
+                self.mode = "EXPLORING"
+                self.activate_cooldown()
+                self.log_event("Escape completado. Reanudando exploración.")
+                self.last_movement_time = self.get_clock().now()
+                return
+            
+            # CAMBIO 5: Comprobar si hay pared detrás antes de retroceder
+            back = self.savg(180, 20)
+            if back < 0.14 or back >= 2:
+                self.stop()
+                self.mode = "EXPLORING"
+                self.activate_cooldown()
+                self.log_event("Escape abortado: pared trasera detectada.")
+                self.last_movement_time = self.get_clock().now()
+                return
+            
+            self.cmd(self.SLOW_SPEED * self.escape_dir_linear, self.escape_dir_angular)
             return
 
-        if self.lecturas_acumuladas < N_LECTURAS_PROMEDIO:
-            return
-
-        if self.estado == 'esperando':
-            self._cambiar_estado('avanzar', 'lecturas listas')
-
-        if self.estado in ('avanzar', 'pasillo'):
-            if not self.path_history:
-                self.path_history.append((self.pos_x, self.pos_y))
-            else:
-                lx, ly = self.path_history[-1]
-                if math.sqrt((self.pos_x - lx)**2 + (self.pos_y - ly)**2) > 0.05:
-                    self.path_history.append((self.pos_x, self.pos_y))
-
-        d_f = self.d_front
-        d_r = self.d_right
-        d_l = self.d_left
-
-        ahora          = time.time()
-        tiempo_generico = ahora - self.tiempo_inicio_giro
-        en_pasillo     = (d_r < DIST_PASILLO and d_l < DIST_PASILLO)
-
-        # --- REGLA PROTEGIDA EN LÍNEA RECTA ---
-        if self.estado in ('avanzar', 'pasillo'):
-            callejon_muerto = (d_f <= 0.18 and d_l < 0.35 and d_r < 0.35)
-            if callejon_muerto:
-                self._cambiar_estado('retroceder', 'callejon real detectado en el fondo')
-                self.punto_inicio_retroceso = (self.pos_x, self.pos_y)
-                if not any(math.sqrt((self.pos_x - cx)**2 + (self.pos_y - cy)**2) < 0.35 for cx, cy in self.callejones_visitados):
-                    self.callejones_visitados.append((self.pos_x, self.pos_y))
-                self.giro_comprometido = False
-                self.reset_filtros()  
+        # Mapeo de seguridad para detectar si estamos bloqueados
+        if self.mode in ["EXECUTING_TURN", "TURN_180"] or fmin < self.FRONT_BRAKE:
+            tiempo_atrapado = (self.get_clock().now() - self.last_movement_time).nanoseconds / 1e9
+            
+            limite_tiempo = 50.0 if self.mode == "TURN_180" else 25.0
+            
+            if tiempo_atrapado > limite_tiempo: 
+                self.stop()
+                self.escape_start_x = self.pos_x
+                self.escape_start_y = self.pos_y
+                
+                if self.backtrack_after_turn:
+                    self.backtrack_after_turn = False
+                    self.returning_to_parent = True
+                    self.log_event("Atasco en 180°. Memoria salvada: Volviendo al padre.")
+                
+                self.escape_dir_linear = -1.0 
+                
+                if lmin < rmin:
+                    self.escape_dir_angular = -0.08 
+                else:
+                    self.escape_dir_angular = 0.08
+                    
+                self.log_event(f"¡ATASCADO! ({tiempo_atrapado:.1f}s). Escape: MARCHA ATRÁS EN CURVA 4cm.")
+                    
+                self.mode = "ESCAPING"
                 return
+        else:
+            self.last_movement_time = self.get_clock().now()
 
-        if self.estado in ('avanzar', 'pasillo'):
-            esquina_cerrada = (d_f < DIST_ESQUINA_CERRADA and d_r < DIST_ESQUINA_CERRADA + 0.05 and d_l < DIST_ESQUINA_CERRADA + 0.05)
-            if esquina_cerrada:
-                self._cambiar_estado('retroceder', 'emergencia: esquina cerrada')
-                self.punto_inicio_retroceso = (self.pos_x, self.pos_y)
-                self.giro_comprometido = False
-                self.reset_filtros()
-                return
-
-        # --- MÁQUINA DE ESTADOS ---
-        if self.estado == 'pasillo':
-            if en_pasillo:
-                self.ticks_fuera_pasillo = 0
-                if d_f < DIST_GIRO_PASILLO:
-                    self._iniciar_giro(ahora)
+        # ── 0.5 DETECCIÓN DE ATASCO POR ODOMETRÍA (El método de los 5cm) ──
+        if self.mode != "ESCAPING":
+            dist_recorrida = dist2d(self.pos_x, self.pos_y, self.stuck_ref_x, self.stuck_ref_y)
+            tiempo_en_zona = (self.get_clock().now() - self.stuck_timer_start).nanoseconds / 1e9
+            
+            if dist_recorrida > self.STUCK_RADIUS:
+                self.stuck_ref_x = self.pos_x
+                self.stuck_ref_y = self.pos_y
+                self.stuck_timer_start = self.get_clock().now()
             else:
-                self.ticks_fuera_pasillo += 1
-                if self.ticks_fuera_pasillo >= TICKS_CONFIRMACION:
-                    self._cambiar_estado('avanzar', 'salida pasillo confirmada')
-                    self.ticks_fuera_pasillo = 0
-
-        elif self.estado == 'avanzar':
-            if en_pasillo and d_f >= DIST_GIRO_PASILLO:
-                self._cambiar_estado('pasillo', 'pasillo detectado')
-                self.ticks_fuera_pasillo = 0
-            elif d_f < DIST_PARAR_GIRO:
-                self._iniciar_giro(ahora)
-
-        elif self.estado in ('girar_izq', 'girar_der'):
-            if self.giro_comprometido:
-                if tiempo_generico >= TIEMPO_GIRO_MINIMO:
-                    self.giro_comprometido = False
-            else:
-                # CORREGIDO: Usamos el frente INSTANTÁNEO y real (d_front_raw) para clavar la salida
-                # En cuanto ve el hueco (> 0.45m), detiene el pivote al milisegundo exacto.
-                if self.d_front_raw >= 0.45:
-                    self._cambiar_estado('avanzar', 'frente libre tras giro')
-                    self.reset_filtros() # CORREGIDO: Limpiamos buffers viejos para empezar a seguir la pared sin vicios
+                limite_tiempo = 40.0 if self.mode == "TURN_180" else 50.0 
+                
+                if tiempo_en_zona > limite_tiempo:
+                    self.stop()
+                    self.escape_start_x = self.pos_x
+                    self.escape_start_y = self.pos_y
+                    
+                    if self.backtrack_after_turn:
+                        self.backtrack_after_turn = False
+                        self.returning_to_parent = True
+                        self.log_event("Atasco en 180°. Memoria salvada: Volviendo al padre.")
+                    
+                    self.escape_dir_linear = -1.0 
+                    
+                    if lmin < rmin:
+                        self.escape_dir_angular = -0.08 
+                    else:
+                        self.escape_dir_angular = 0.08
+                        
+                    self.log_event(f"¡ATASCADO FÍSICAMENTE! ({tiempo_en_zona:.1f}s atrapado en 5cm). Escape.")
+                    
+                    self.mode = "ESCAPING"
+                    
+                    self.stuck_ref_x = self.pos_x
+                    self.stuck_ref_y = self.pos_y
+                    self.stuck_timer_start = self.get_clock().now()
                     return
 
-        elif self.estado == 'retroceder':
-            if self.path_history:
-                target_x, target_y = self.path_history[-1]
-                distance = math.sqrt((target_x - self.pos_x)**2 + (target_y - self.pos_y)**2)
+        # ── 1. APPROACHING_INTERSECTION ──
+        if self.mode == "APPROACHING_INTERSECTION":
+            if lmin < rmin and lmin < 0.40:
+                err = lmin - 0.155
+            elif rmin < 0.40:
+                err = 0.155 - rmin
+            else:
+                err = 0.0
                 
-                while distance < 0.07 and len(self.path_history) > 1:
-                    self.path_history.pop()
-                    target_x, target_y = self.path_history[-1]
-                    distance = math.sqrt((target_x - self.pos_x)**2 + (target_y - self.pos_y)**2)
+            ac = self.clamp(err * 3.5, -0.40, 0.40)
+            
+            grado_cero = self.smin(0, 10)
+            adv = dist2d(self.pos_x, self.pos_y, self.verify_start_x, self.verify_start_y)
 
-                dist_desde_inicio = 0.0
-                if self.punto_inicio_retroceso:
-                    ix, iy = self.punto_inicio_retroceso
-                    dist_desde_inicio = math.sqrt((self.pos_x - ix)**2 + (self.pos_y - iy)**2)
+            if adv < 0.04 and grado_cero > 0.18:
+                self.cmd(self.SLOW_SPEED, ac); return
 
-                if dist_desde_inicio > 0.38 or self.d_back <= DIST_SEGURIDAD_TRASERA:
-                    izq_despejada = (d_l > 0.40) and not self._camino_conduce_a_callejon('izq')
-                    der_despejada = (d_r > 0.40) and not self._camino_conduce_a_callejon('der')
+            self.stop()
+            self.mode = "ANALYZING_NODE"
+            self.log_event(f"Posición lista (F:{grado_cero:.2f}m). Evaluando cruce...")
+            return
+
+        # ── 2. ANALYZING_NODE ──
+        if self.mode == "ANALYZING_NODE":
+            
+            frente_abierto = self.savg(0, 15) > 0.29
+
+            izq_abierto = self.savg(90, 15) > 0.39 or self.savg(45, 30) > 0.49
+            der_abierto = self.savg(270, 15) > 0.39 or self.savg(315, 30) > 0.49
+
+            caminos_detectados_relativos = []
+            if frente_abierto: caminos_detectados_relativos.append(0.0)
+            if izq_abierto: caminos_detectados_relativos.append(math.radians(55))
+            if der_abierto: caminos_detectados_relativos.append(math.radians(-55))
+
+            fp = [normalize_angle(self.yaw + ang) for ang in caminos_detectados_relativos]
+            cf = normalize_angle(self.yaw + math.pi)
+
+            # --- DETECCIÓN DE NODO CAMUFLADO ---
+            es_nodo_padre = False
+            if self.returning_to_parent and self.current_node is not None:
+                dist_al_nodo = dist2d(self.pos_x, self.pos_y, self.current_node['x'], self.current_node['y'])
+                if dist_al_nodo < 0.45:
+                    es_nodo_padre = True
+
+            # --- DECISIÓN TOPOLÓGICA Y BACKTRACKING ---
+            if len(fp) == 0:
+                # ── SÚPER SALVAVIDAS ANTI-FALSOS CALLEJONES ──
+                val_L = max(self.savg(90, 20), self.savg(45, 20))
+                val_R = max(self.savg(270, 20), self.savg(315, 20))
+                
+                if val_L > 0.30 and val_L > (val_R + 0.10):
+                    self.log_event(f"Curva rescatada por asimetría IZQ (L:{val_L:.2f}). Girando.")
+                    self.target_yaw = normalize_angle(self.yaw + self.TURN_ANGLE_RAD)
+                    self.mode = "EXECUTING_TURN"
                     
-                    if izq_despejada or der_despejada:
-                        lado = 'izq' if d_l > d_r else 'der'
-                        self._cambiar_estado(f'girar_{lado}', f'Saliendo del callejón hacia {lado}')
-                        self.tiempo_inicio_giro = ahora
-                        self.giro_comprometido  = True
-                        self.reset_filtros() # CORREGIDO: Limpiamos los buffers antes de empezar a girar
+                elif val_R > 0.30 and val_R > (val_L + 0.10):
+                    self.log_event(f"Curva rescatada por asimetría DER (R:{val_R:.2f}). Girando.")
+                    self.target_yaw = normalize_angle(self.yaw - self.TURN_ANGLE_RAD)
+                    self.mode = "EXECUTING_TURN"
+                    
+                elif val_L > 0.30 and val_R > 0.45:
+                    self.log_event(f"Cruce en 'T' ciego rescatado (L:{val_L:.2f}, R:{val_R:.2f}). Forzando giro.")
+                    if val_L > val_R:
+                        self.target_yaw = normalize_angle(self.yaw + self.TURN_ANGLE_RAD)
+                    else:
+                        self.target_yaw = normalize_angle(self.yaw - self.TURN_ANGLE_RAD)
+                    self.mode = "EXECUTING_TURN"
+                    
+                else:
+                    self.log_event(f"Callejón sin salida confirmado. 180° (Max L:{val_L:.2f}, R:{val_R:.2f})")
+                    self.target_yaw = normalize_angle(self.yaw + math.pi)
+                    self.activate_cooldown()
+                    self.mode = "TURN_180"
+
+            elif len(fp) == 1 and not es_nodo_padre:
+                if fp[0] == 0.0:
+                    self.log_event("Falsa alarma (Solo frente). Aplicando venda y cruzando.")
+                    self.mode = "EXPLORING"
+                    self.activate_cooldown()
+                    self.cooldown_ticks = 20
+                else:
+                    self.log_event("Curva obligatoria confirmada. Girando.")
+                    self.target_yaw = fp[0]
+                    self.mode = "EXECUTING_TURN"
+                    
+            else:
+                if es_nodo_padre and len(fp) == 1:
+                    self.log_event("Nodo padre alcanzado (camuflado como curva).")
+                else:
+                    self.log_event(f"Cruce ({len(fp)} vías). F:{frente_abierto} L:{izq_abierto} R:{der_abierto}")
+
+                # CAMBIO 3: Graph Exhausted condition
+                if self.returning_to_parent and self.current_node is None:
+                    if len(self.topological_graph) > 0:
+                        self.log_event("GRAFO AGOTADO. Reiniciando exploración desde cero.")
+                        self.topological_graph = []
+                        self.current_node = None
+                        self.returning_to_parent = False
+                        self.path_letters = []
+                        self.mode = "EXPLORING"
+                        self.activate_cooldown()
+                        return
+                    else:
+                        self.log_event("Primer cruce tras cul-de-sac inicial. Creando mapa.")
+                        self.returning_to_parent = False
+
+                if self.returning_to_parent:
+                    
+                    # CAMBIO 2: GPS Verification — comprobar distancia real al padre
+                    es_el_padre_real = False
+                    if self.current_node:
+                        dist_al_padre = dist2d(self.pos_x, self.pos_y, self.current_node['x'], self.current_node['y'])
+                        if dist_al_padre < 0.25:
+                            es_el_padre_real = True
+                            
+                    # CASO A: Es el padre real (o el primer nodo de todos)
+                    if self.current_node is None or es_el_padre_real:
+                        self.log_event("Regreso a Nodo Padre Completado")
+                        self.returning_to_parent = False
+                        self.path_letters.append('B')
+                        self.simplify_path()
+                        
+                        if self.current_node and len(self.current_node['unexplored']) > 0:
+                            best_match_diff = float('inf')
+                            best_dir = cf
+                            best_unexp_idx = -1
+                            
+                            for current_dir in fp:
+                                for i, unexp_dir in enumerate(self.current_node['unexplored']):
+                                    diff = abs(angle_diff(current_dir, unexp_dir))
+                                    if diff < best_match_diff:
+                                        best_match_diff = diff
+                                        best_dir = current_dir
+                                        best_unexp_idx = i
+                                        
+                            if best_match_diff < 0.8: 
+                                self.current_node['unexplored'].pop(best_unexp_idx)
+                                self.log_event("Memoria topológica: Ruta inexplorada recuperada con éxito.")
+                            else:
+                                self.log_event("Aviso: Desfase de orientación. Escogiendo alternativa forzada.")
+                                best_dir = fp[-1] if len(fp) > 1 else fp[0]
+                                
+                            self.target_yaw = best_dir
+                            self.mode = "EXECUTING_TURN"
+                            self.log_event(f"Re-evaluación tras retorno: Eligiendo giro de {math.degrees(angle_diff(best_dir, self.yaw)):.0f}°")
+                        
+                        else:
+                            self.log_event("Nodo Padre Agotado. Reiniciando exploración como nuevo inicio.")
+                            self.topological_graph = []
+                            self.current_node = None
+                            self.returning_to_parent = False
+                            self.path_letters = []
+                            
+                            # Para evitar que se quede quieto, forzamos la salida por el camino menos visitado
+                            best_dir, best_v = fp[0], float('inf')
+                            for d in fp:
+                                v = self.visited_cells.get(self.cell(self.pos_x+0.35*math.cos(d), self.pos_y+0.35*math.sin(d)), 0)
+                                if v < best_v: 
+                                    best_v, best_dir = v, d
+                                    
+                            self.target_yaw = best_dir
+                            self.mode = "EXECUTING_TURN"
+
+                    # CASO B: Nuevo cruce descubierto a la vuelta (Falso Padre)
+                    else:
+                        self.log_event(f"Cruce intermedio detectado (Dist al padre: {dist_al_padre:.2f}m). Registrando como nuevo nodo.")
+                        
+                        # 1. Cancelamos el modo retorno temporalmente.
+                        # Ahora este nuevo cruce es nuestro foco principal.
+                        self.returning_to_parent = False
+                        
+                        # 2. Truco topológico: El robot venía de un cul-de-sac (atrás).
+                        # Su padre original está hacia adelante (self.yaw).
+                        # Le decimos que su "origen" (came_from) es hacia adelante. 
+                        # De esta forma, el algoritmo filtrará el frente para no ir por ahí ahora,
+                        # obligándole a explorar los laterales primero. Cuando agote los laterales,
+                        # el robot usará este 'came_from' para seguir recto hacia el padre original.
+                        cf_hacia_padre = self.yaw
+                        
+                        # 3. Procesamos este nodo como cualquier otro en el grafo
+                        self.process_topological_node(fp, cf_hacia_padre)
+                        
+                        # 4. Red de seguridad: Si por alguna razón la decisión topológica
+                        # fue seguir recto, evitamos que intente "girar 0 grados" y cruzamos fluidamente.
+                        if self.mode == "EXECUTING_TURN" and abs(normalize_angle(self.target_yaw - self.yaw)) < 0.10:
+                            self.log_event("Decisión de cruce: Seguir recto por el momento. Activando escudo.")
+                            self.mode = "EXPLORING"
+                            self.activate_cooldown() 
+                            self.cooldown_ticks = 50
+                
+                else:
+                    self.log_event(f"Cruce ({len(fp)} vías). F:{frente_abierto} L:{izq_abierto} R:{der_abierto}")
+                    self.process_topological_node(fp, cf)
+                    
+                    if self.mode == "EXECUTING_TURN" and abs(normalize_angle(self.target_yaw - self.yaw)) < 0.10:
+                        self.log_event("Decisión de cruce: Continuar recto (Giro 0°). Activando escudo de 5 segundos.")
+                        self.mode = "EXPLORING"
+                        self.activate_cooldown() 
+                        self.cooldown_ticks = 50
                         return
 
-        # --- APLICACIÓN DE VELOCIDADES ---
-        evento = ''
-        if self.estado == 'pasillo':
-            twist.linear.x  = VEL_LINEAR_PASILLO
-            twist.angular.z = 0.0
-            evento = 'pasillo_recto'
-            
-        elif self.estado == 'retroceder':
-            if self.path_history:
-                target_x, target_y = self.path_history[-1]
-                dx = target_x - self.pos_x
-                dy = target_y - self.pos_y
-                target_angle = math.atan2(dy, dx)
-                
-                error_angle = target_angle - (self.yaw + math.pi)
-                error_angle = math.atan2(math.sin(error_angle), math.cos(error_angle))
-                
-                if self.d_back > DIST_SEGURIDAD_TRASERA:
-                    twist.linear.x = -VEL_RETROCESO
-                else:
-                    twist.linear.x = 0.0  
-                    evento = 'ESCUDO ACTIVADO: Freno por proximidad trasera'
-                
-                twist.angular.z = 1.2 * error_angle 
-                if not evento: evento = 'deshaciendo_pasos'
-            else:
-                if self.d_back > DIST_SEGURIDAD_TRASERA:
-                    twist.linear.x = -VEL_RETROCESO
-                else:
-                    twist.linear.x = 0.0
-                twist.angular.z = 0.0
-                evento = 'retro_lineal_fallback'
-            
-        elif self.estado == 'girar_izq':
-            twist.linear.x  = 0.0  # Pivote puro in-situ
-            twist.angular.z = VEL_GIRO
-            evento = 'pivote_izq'
-            
-        elif self.estado == 'girar_der':
-            twist.linear.x  = 0.0  # Pivote puro in-situ
-            twist.angular.z = -VEL_GIRO
-            evento = 'pivote_der'
-            
-        else:  # avanzar
-            vel = self.velocidad_frenada(d_f, VEL_LINEAR_NORMAL)
-            twist.linear.x = vel
-            if d_r > 1.2:
-                if self._camino_conduce_a_callejon('der'):
-                    twist.angular.z = 0.0  
-                    evento = 'Ignorando callejón por blacklist'
-                else:
-                    twist.angular.z = -0.20
-                    evento = 'buscando_muro'
-            else:
-                error = DIST_PARED_DERECHA - d_r
-                twist.angular.z = max(min(KP * error, 0.40), -0.40)
-                evento = 'siguiendo_muro_der'
+        # ── 3. EXECUTING_TURN ──
+        if self.mode == "EXECUTING_TURN":
+            if self.execute_safe_turn(self.target_yaw, self.ANGULAR_SPEED):
+                self.mode = "EXPLORING"
+                self.activate_cooldown()
+                self.in_intersection_zone = True
+                self.log_event("Giro completado.")
+            return
 
-        self.vel_lin_pub = twist.linear.x
-        self.vel_ang_pub = twist.angular.z
-        self._log_tick(evento)
-        self.cmd_pub.publish(twist)
+        # ── 4. TURN_180 ──
+        if self.mode == "TURN_180":
+            if self.execute_safe_turn(self.target_yaw, self.ANGULAR_SPEED * 0.8):
+                if self.backtrack_after_turn:
+                    self.backtrack_after_turn = False
+                    self.returning_to_parent = True
+                    self.log_event("180° OK. Buscando Nodo Padre.")
+                self.mode = "EXPLORING"
+                self.activate_cooldown()
+                self.in_intersection_zone = True
+            return
 
-    def __del__(self):
-        try:
-            self.log_file.close()
-        except Exception:
-            pass
+        # ══════════════════════════════════════════
+        # 5. EXPLORING — WALL FOLLOWING (14-17cm de pared)
+        # ══════════════════════════════════════════
+        
+        if lmin < 0.30 and rmin < 0.30:
+            self.in_intersection_zone = False
+
+        izq_abierto_mov = self.savg(90, 20) > 0.35 or self.savg(45, 20) > 0.45
+        der_abierto_mov = self.savg(270, 20) > 0.35 or self.savg(315, 20) > 0.45
+        has_lat = izq_abierto_mov or der_abierto_mov
+
+        if abs(self.last_angular) > 0.15: has_lat = False
+        
+        # ── INTERRUPTOR DE COOLDOWN POR RADIO DE CENTÍMETROS ──
+        if self.detection_cooldown:
+            dist_desde_nodo = dist2d(self.pos_x, self.pos_y, self.cooldown_x, self.cooldown_y)
+            
+            if dist_desde_nodo >= self.COOLDOWN_DISTANCE:
+                self.detection_cooldown = False
+                self.in_intersection_zone = False 
+                self.get_logger().info("COOLDOWN FINALIZADO: El robot ha salido con éxito del cruce.")
+            else: 
+                has_lat = False
+                self.in_intersection_zone = True
+                
+                if lmin < 0.20 and rmin < 0.20:
+                    pass  
+                elif flmin < 0.20 or lmin < 0.16:
+                    deficit = max(0.20 - flmin, 0.16 - lmin)
+                    error = deficit * -4.0
+                elif frmin < 0.20 or rmin < 0.16:
+                    deficit = max(0.20 - frmin, 0.16 - rmin)
+                    error = deficit * 4.0
+
+        # --- GATILLO 1: HUECO LATERAL DETECTADO ---
+        if has_lat and not self.detection_cooldown and not self.in_intersection_zone and fmin > 0.60:
+            self.stop()
+            self.mode = "ANALYZING_NODE" 
+            self.verify_start_x, self.verify_start_y = self.pos_x, self.pos_y
+            self.in_intersection_zone = True
+            self.log_event("Hueco lateral (+). Freno en seco y evaluando...")
+            return
+
+        # --- GATILLO 2: FRENO EN CURVAS Y T ---
+        elif not self.detection_cooldown and fmin <= self.WALL_STOP and has_lat:
+            self.stop()
+            self.mode = "ANALYZING_NODE"
+            self.verify_start_x, self.verify_start_y = self.pos_x, self.pos_y
+            self.in_intersection_zone = True
+            self.log_event(f"Pared frontal a {fmin:.2f}m. Evaluando...")
+            return
+
+        # Cul-de-sac
+        back_dist = self.savg(180, 24)
+        if fmin < 0.20 and lmin < 0.20 and rmin < 0.20 and back_dist > 0.30:
+            has_exit = False
+            for sd in range(0, 360, 15):
+                if 140 <= sd <= 220: continue
+                if self.savg(sd, 14) > 0.30: has_exit = True; break
+            if not has_exit:
+                self.log_event("CUL-DE-SAC. 180°.")
+                self.target_yaw = normalize_angle(self.yaw + math.pi)
+                self.backtrack_after_turn = True
+                self.mode = "TURN_180"; return
+
+        # ── FRENO FRONTAL ──
+        if fmin < self.FRONT_BRAKE:
+            td = 1.0 if lmin > rmin else -1.0
+            self.cmd(0, td * self.ANGULAR_SPEED * 0.6); return
+
+        # ══════════════════════════════════════════
+        # WALL FOLLOWING: Control PD Robusto (Anti-huecos)
+        # ══════════════════════════════════════════
+        TARGET = 0.155        
+        TARGET_DIAG = 0.220   
+        WALL_VISIBLE = 0.32   
+        
+        c_flmin = min(flmin, 0.26)
+        c_frmin = min(frmin, 0.26)
+        
+        error = 0.0
+
+        if lmin < WALL_VISIBLE and rmin < WALL_VISIBLE:
+            if lmin < rmin:
+                error = (lmin - TARGET) * 3.0 + (c_flmin - TARGET_DIAG) * 1.5
+            else:
+                error = (TARGET - rmin) * 3.0 + (TARGET_DIAG - c_frmin) * 1.5
+        elif lmin < WALL_VISIBLE:
+            error = (lmin - TARGET) * 3.0 + (c_flmin - TARGET_DIAG) * 1.5
+        elif rmin < WALL_VISIBLE:
+            error = (TARGET - rmin) * 3.0 + (TARGET_DIAG - c_frmin) * 1.5
+
+        if lmin < 0.115 or flmin < 0.13:
+            error = -0.6  
+        elif rmin < 0.115 or frmin < 0.13:
+            error = 0.6   
+
+        angular = self.clamp(error, -0.45, 0.45)
+        
+        linear = self.LINEAR_SPEED
+        if fmin < self.FRONT_SLOW or abs(angular) > 0.20:
+            linear = self.SLOW_SPEED
+
+        self.cmd(linear, angular)
 
 def main(args=None):
     rclpy.init(args=args)
-    nodo = MazeSolver()
-    try:
-        rclpy.spin(nodo)
-    except KeyboardInterrupt:
-        pass
+    node = LaberintSolver()
+    try: rclpy.spin(node)
+    except KeyboardInterrupt: pass
     finally:
-        nodo._log_raw('=== INTERRUPCION USUARIO ===')
-        nodo.cmd_pub.publish(Twist())
-        nodo.destroy_node()
-        rclpy.shutdown()
+        if rclpy.ok(): node.destroy_node(); rclpy.shutdown()
 
 if __name__ == '__main__':
     main()
