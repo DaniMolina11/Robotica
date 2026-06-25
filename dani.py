@@ -56,7 +56,7 @@ class MazeSolver(Node):
 
         self.pos_x = 0.0
         self.pos_y = 0.0
-        self.yaw   = 0.0  # NUEVO: Orientación angular para guiar la marcha atrás exacta
+        self.yaw   = 0.0  # Orientación precisa para guiar el retroceso exacto
         self.lecturas_acumuladas = 0
 
         self.estado          = 'esperando'
@@ -66,9 +66,9 @@ class MazeSolver(Node):
         self.giro_comprometido       = False
         self.ticks_fuera_pasillo     = 0
 
-        # NUEVO: Estructuras de memoria de coordenadas para el descarte de caminos
-        self.path_history           = []  # Historial de huellas (coordenadas x,y por las que ha pasado)
-        self.punto_inicio_retroceso = None # Punto exacto donde detectó el callejón
+        # --- SISTEMA DE MEMORIA DE COORDENADAS ---
+        self.path_history           = []  # Lista de puntos (x,y) recorridos en positivo
+        self.punto_inicio_retroceso = None # Dónde empezó la marcha atrás
         self.callejones_visitados   = []  # Blacklist de callejones completados
 
         self.META_X               = 2.75
@@ -81,16 +81,7 @@ class MazeSolver(Node):
         self.vel_ang_pub = 0.0
 
         self.log_file = open(LOG_FILE, 'w')
-        self._log_raw('=== INICIO SESION MAZE SOLVER RETROCESO ABSOLUTO ===')
-        self._log_raw(
-            f'Params: DIST_GIRO={DIST_GIRO_PASILLO} DIST_PARAR={DIST_PARAR_GIRO} '
-            f'VEL_NORMAL={VEL_LINEAR_NORMAL} VEL_GIRO={VEL_GIRO}'
-        )
-        self._log_raw(
-            'TSIM      | POS_X  | POS_Y  | ESTADO       | '
-            'F     | R     | L     | VL      | VA      | EVENTO'
-        )
-        self._log_raw('-' * 130)
+        self._log_raw('=== INICIO SESION MAZE SOLVER TRAZADO REVERSO ===')
 
     def _log_raw(self, msg):
         ts = time.strftime('%H:%M:%S')
@@ -106,11 +97,7 @@ class MazeSolver(Node):
         )
 
     def _log_evento(self, msg):
-        self._log_raw(
-            f'*** {msg} | estado={self.estado} '
-            f'pos=({self.pos_x:.3f},{self.pos_y:.3f}) '
-            f'F={self.d_front:.2f} R={self.d_right:.2f} L={self.d_left:.2f}'
-        )
+        self._log_raw(f'*** {msg} | estado={self.estado} pos=({self.pos_x:.2f},{self.pos_y:.2f}) F={self.d_front:.2f}')
 
     def clean(self, v):
         return 3.0 if (math.isinf(v) or math.isnan(v)) else float(v)
@@ -161,7 +148,7 @@ class MazeSolver(Node):
         self.pos_x = msg.pose.pose.position.x
         self.pos_y = msg.pose.pose.position.y
         
-        # Conversión del Cuaternión a ángulo Yaw (Orientación precisa en radianes)
+        # Obtención del ángulo Yaw (Orientación) desde la odometría
         q = msg.pose.pose.orientation
         siny_cosp = 2.0 * (q.w * q.z + q.x * q.y)
         cosy_cosp = 1.0 - 2.0 * (q.y * q.y + q.z * q.z)
@@ -173,11 +160,10 @@ class MazeSolver(Node):
             self._log_evento(f'META ALCANZADA dist={dist:.3f}')
 
     def _camino_conduce_a_callejon(self, lado):
-        """NUEVO: Proyecta una posición virtual a 0.55m en la dirección elegida para ver si es una trampa"""
+        """Verifica si tomar un pasillo lateral nos mete de cabeza en un callejón guardado en memoria"""
         angulo = self.yaw + (math.pi/2.0 if lado == 'izq' else -math.pi/2.0)
         px = self.pos_x + 0.55 * math.cos(angulo)
         py = self.pos_y + 0.55 * math.sin(angulo)
-        
         for cx, cy in self.callejones_visitados:
             if math.sqrt((px - cx)**2 + (py - cy)**2) < 0.45:
                 return True
@@ -193,19 +179,16 @@ class MazeSolver(Node):
         en_pasillo = (self.d_right < DIST_PASILLO and self.d_left < DIST_PASILLO)
         if en_pasillo:
             lado = 'izq' if self.d_diag_izq >= self.d_diag_der else 'der'
-            self._log_evento(f'Giro en PASILLO por diagonal: lado={lado}')
         else:
             lado = 'izq' if self.d_left >= self.d_right else 'der'
-            self._log_evento(f'Giro NORMAL: lado={lado}')
             
-        # ANTIBUCLE: Si el lado elegido coincide con un callejón ciego guardado en memoria, va por el otro flanco
+        # Antibucle por memoria de coordenadas
         if lado == 'izq' and self._camino_conduce_a_callejon('izq'):
-            self._log_evento('ANTIBUCLE MEMORIA: Izquierda es un callejón ciego completado. Forzando DERECHA.')
+            self._log_evento('ANTIBUCLE: Izquierda fichada como callejón ciego. Forzando DERECHA.')
             lado = 'der'
         elif lado == 'der' and self._camino_conduce_a_callejon('der'):
-            self._log_evento('ANTIBUCLE MEMORIA: Derecha es un callejón ciego completado. Forzando IZQUIERDA.')
+            self._log_evento('ANTIBUCLE: Derecha fichada como callejón ciego. Forzando IZQUIERDA.')
             lado = 'izq'
-            
         return lado
 
     def _iniciar_giro(self, ahora):
@@ -218,7 +201,7 @@ class MazeSolver(Node):
         twist = Twist()
 
         if self.meta_alcanzada:
-            self._cmd_pub.publish(twist)
+            self.cmd_pub.publish(twist)
             return
 
         if self.lecturas_acumuladas < N_LECTURAS_PROMEDIO:
@@ -227,7 +210,7 @@ class MazeSolver(Node):
         if self.estado == 'esperando':
             self._cambiar_estado('avanzar', 'lecturas listas')
 
-        # REGISTRADORA DE HUELLAS AUTOMÁTICA
+        # --- GRABADORA DE COORDENADAS (HUELLAS) ---
         if self.estado in ('avanzar', 'pasillo'):
             if not self.path_history:
                 self.path_history.append((self.pos_x, self.pos_y))
@@ -244,29 +227,16 @@ class MazeSolver(Node):
         tiempo_girando = ahora - self.tiempo_inicio_giro
         en_pasillo     = (d_r < DIST_PASILLO and d_l < DIST_PASILLO)
 
-        # --- REGLA PROTEGIDA EN LÍNEA RECTA ---
+        # --- DETECCIÓN DE CALLEJÓN INICIAL ---
         if self.estado in ('avanzar', 'pasillo'):
-            callejon_muerto = (d_f <= 0.24 and d_l < 0.32 and d_r < 0.32)
+            callejon_muerto = (d_f <= 0.24 and d_l < 0.30 and d_r < 0.30)
             if callejon_muerto:
-                self._cambiar_estado('retroceder', 'callejon detectado (muros frontales y laterales cerrados)')
+                self._cambiar_estado('retroceder', 'callejon detectado de frente')
                 self.punto_inicio_retroceso = (self.pos_x, self.pos_y)
-                
-                # Guardamos la posición exacta del rincón para no volver a entrar jamás
                 if not any(math.sqrt((self.pos_x - cx)**2 + (self.pos_y - cy)**2) < 0.35 for cx, cy in self.callejones_visitados):
                     self.callejones_visitados.append((self.pos_x, self.pos_y))
-                    self._log_evento(f'AÑADIDO A LA BLACKLIST DE CALLEJONES: ({self.pos_x:.2f}, {self.pos_y:.2f})')
-                
                 self.giro_comprometido = False
                 self.reset_filtros()  
-                return
-
-        if self.estado in ('avanzar', 'pasillo'):
-            esquina_cerrada = (d_f < DIST_ESQUINA_CERRADA and d_r < DIST_ESQUINA_CERRADA + 0.05 and d_l < DIST_ESQUINA_CERRADA + 0.05)
-            if esquina_cerrada:
-                self._cambiar_estado('retroceder', 'emergencia: esquina cerrada')
-                self.punto_inicio_retroceso = (self.pos_x, self.pos_y)
-                self.giro_comprometido = False
-                self.reset_filtros()
                 return
 
         # --- MÁQUINA DE ESTADOS ---
@@ -288,10 +258,27 @@ class MazeSolver(Node):
             elif d_f < DIST_PARAR_GIRO:
                 self._iniciar_giro(ahora)
 
+        elif self.estado in ('girar_izq', 'girar_der'):
+            if self.giro_comprometido:
+                if tiempo_girando >= TIEMPO_GIRO_MINIMO:
+                    self.giro_comprometido = False
+            else:
+                if d_f >= DIST_PARAR_GIRO + 0.10:
+                    self._cambiar_estado('avanzar', 'frente libre tras giro')
+                elif d_f < DIST_PARAR_GIRO - 0.05:
+                    # --- SOLUCIÓN AL BUG DE LA OSCILACIÓN ---
+                    # Si ha pasado el tiempo mínimo y el frente sigue colapsado, significa que el giro ha fallado
+                    # porque el robot está atrapado. Forzamos la marcha atrás inmediata sin oscilar más.
+                    self._cambiar_estado('retroceder', 'Giro fallido por bloqueo físico. Activando retroceso.')
+                    self.punto_inicio_retroceso = (self.pos_x, self.pos_y)
+                    if not any(math.sqrt((self.pos_x - cx)**2 + (self.pos_y - cy)**2) < 0.35 for cx, cy in self.callejones_visitados):
+                        self.callejones_visitados.append((self.pos_x, self.pos_y))
+                    self.reset_filtros()
+                    return
+
         elif self.estado == 'retroceder':
-            # CONTROL DE SALIDA SEGURO: Mientras deshaga el camino, solo evaluará girar si se ha alejado lo
-            # suficiente del rincón (> 0.38m) para asegurar que el chasis libre las paredes al rotar.
             if self.path_history:
+                # Vamos extrayendo los puntos de la trayectoria en sentido inverso
                 target_x, target_y = self.path_history[-1]
                 distance = math.sqrt((target_x - self.pos_x)**2 + (target_y - self.pos_y)**2)
                 
@@ -300,54 +287,45 @@ class MazeSolver(Node):
                     target_x, target_y = self.path_history[-1]
                     distance = math.sqrt((target_x - self.pos_x)**2 + (target_y - self.pos_y)**2)
 
+                # Comprobamos la distancia recorrida desde el fondo del rincón
                 dist_desde_inicio = 0.0
                 if self.punto_inicio_retroceso:
                     ix, iy = self.punto_inicio_retroceso
                     dist_desde_inicio = math.sqrt((self.pos_x - ix)**2 + (self.pos_y - iy)**2)
 
-                if dist_desde_inicio > 0.38:
-                    izq_valida = (d_l > 0.40) and not self._camino_conduce_a_callejon('izq')
-                    der_valida = (d_r > 0.40) and not self._camino_conduce_a_callejon('der')
+                # Solo evaluamos salir de la marcha atrás si nos hemos alejado más de 0.40m (morro libre)
+                if dist_desde_inicio > 0.40:
+                    izq_despejada = (d_l > 0.40) and not self._camino_conduce_a_callejon('izq')
+                    der_despejada = (d_r > 0.40) and not self._camino_conduce_a_callejon('der')
                     
-                    if izq_valida or der_valida:
+                    if izq_despejada or der_despejada:
                         lado = 'izq' if d_l > d_r else 'der'
-                        self._cambiar_estado(f'girar_{lado}', f'salida trasera segura encontrada hacia {lado}')
+                        self._cambiar_estado(f'girar_{lado}', f'Saliendo del callejón marcha atrás hacia {lado}')
                         self.tiempo_inicio_giro = ahora
                         self.giro_comprometido  = True
                         return
 
-        elif self.estado in ('girar_izq', 'girar_der'):
-            if self.giro_comprometido:
-                if tiempo_girando >= TIEMPO_GIRO_MINIMO:
-                    self.giro_comprometido = False
-            else:
-                if d_f >= DIST_PARAR_GIRO + 0.10:
-                    self._cambiar_estado('avanzar', f'frente libre d_f={d_f:.2f}')
-                elif d_f < DIST_PARAR_GIRO - 0.05:
-                    self._iniciar_giro(ahora)
-
-        # --- APLICACIÓN DE VELOCIDADES ---
+        # --- GENERACIÓN DE VELOCIDADES ---
         evento = ''
         if self.estado == 'pasillo':
             twist.linear.x  = VEL_LINEAR_PASILLO
             twist.angular.z = 0.0
-            evento = f'pasillo_recto f={d_f:.2f}'
+            evento = 'pasillo_recto'
             
         elif self.estado == 'retroceder':
-            # RETROCEDER SOBRE SUS PROPIOS PASOS MATEMÁTICOS (Cero colisiones angulares)
             if self.path_history:
+                # Control geométrico de marcha atrás sobre carril de huellas
                 target_x, target_y = self.path_history[-1]
                 dx = target_x - self.pos_x
                 dy = target_y - self.pos_y
                 target_angle = math.atan2(dy, dx)
                 
-                # El error angular marcha atrás: la parte de atrás del robot (yaw + pi) apunta a la huella anterior
                 error_angle = target_angle - (self.yaw + math.pi)
                 error_angle = math.atan2(math.sin(error_angle), math.cos(error_angle))
                 
                 twist.linear.x = -VEL_RETROCESO
-                twist.angular.z = 1.2 * error_angle # Pequeña corrección de raíl para clavar la línea
-                evento = f'deshaciendo_huellas_recto err_ang={error_angle:.2f}'
+                twist.angular.z = 1.2 * error_angle # Alineación magnética milimétrica con la huella anterior
+                evento = 'deshaciendo_pasos'
             else:
                 twist.linear.x = -VEL_RETROCESO
                 twist.angular.z = 0.0
@@ -356,28 +334,27 @@ class MazeSolver(Node):
         elif self.estado == 'girar_izq':
             twist.linear.x  = VEL_AVANCE_GIRO if d_f > 0.22 else 0.0
             twist.angular.z = VEL_GIRO
-            evento = f'girar_izq t={tiempo_girando:.1f}s'
+            evento = 'girar_izq'
             
         elif self.estado == 'girar_der':
             twist.linear.x  = VEL_AVANCE_GIRO if d_f > 0.22 else 0.0
             twist.angular.z = -VEL_GIRO
-            evento = f'girar_der t={tiempo_girando:.1f}s'
+            evento = 'girar_der'
             
         else:  # avanzar
             vel = self.velocidad_frenada(d_f, VEL_LINEAR_NORMAL)
             twist.linear.x = vel
             if d_r > 1.2:
-                # Comprobación preventiva en carrera: si se abre la derecha, miramos que no sea un callejón negro
                 if self._camino_conduce_a_callejon('der'):
-                    twist.angular.z = 0.0  # Le obligamos a pasar de largo recto e ignorar el bucle ciego
-                    evento = 'ANTIBUCLE: Ignorando callejón guardado a la derecha'
+                    twist.angular.z = 0.0  # Pasa de largo ignorando el pasillo ciego fichado
+                    evento = 'Ignorando callejón por blacklist'
                 else:
                     twist.angular.z = -0.20
-                    evento = f'buscando_pared vel={vel:.3f}'
+                    evento = 'buscando_muro'
             else:
                 error = DIST_PARED_DERECHA - d_r
                 twist.angular.z = max(min(KP * error, 0.40), -0.40)
-                evento = f'siguiendo_pared_der err={error:.3f}'
+                evento = 'siguiendo_muro_der'
 
         self.vel_lin_pub = twist.linear.x
         self.vel_ang_pub = twist.angular.z
@@ -400,7 +377,6 @@ def main(args=None):
     finally:
         nodo._log_raw('=== INTERRUPCION USUARIO ===')
         nodo.cmd_pub.publish(Twist())
-        nodo.log_file.close()
         nodo.destroy_node()
         rclpy.shutdown()
 
