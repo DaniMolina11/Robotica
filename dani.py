@@ -1,3 +1,5 @@
+#!/usr/bin/env python3
+
 import math
 from datetime import datetime
 from collections import defaultdict
